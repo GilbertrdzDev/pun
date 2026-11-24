@@ -122,6 +122,8 @@ Later settings win, in this order:
 
 Warnings don't fail the run unless you set a warning limit. `--fix` skips rules with `fix = "off"`.
 
+Some unsafe Laravel fixes, such as [`laravel/prefer-request-server`](/docs/rules/lint/laravel/prefer-request-server), write facade calls that need a booted Laravel application. Leave out code that runs before Laravel boots, such as `tests/bootstrap.php`, with `exclude` or an override.
+
 Laravel, Pest, and PHPUnit rules also need their [extension](#extensions). PHP upgrade rules, such as the `php-8.5` group, run only when `[php] version` is that version or later. Groups such as `laravel-12` turn on only when you name them.
 
 ## [analyse]

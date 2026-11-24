@@ -13,6 +13,10 @@ In the [`lint-strict`](/docs/rules/presets/lint-strict) preset. In Rector's [`re
 
 Use the Request facade instead of $_GET, $_POST and $_SERVER.
 
+### Why
+
+The fix replaces `$_GET`, `$_POST` and `$_REQUEST` with a call to the `Request` facade, which needs a booted Laravel application. In code that runs before Laravel boots, such as a test bootstrap file or a ParaTest worker helper, the call fails with `RuntimeException: A facade root has not been set.` Rector's `RequestVariablesToRequestFacadeRector` rewrites such code the same way. To keep the superglobals there, turn the rule off for those files with an override (`[[lint.overrides]]` with `files = ["tests/bootstrap.php"]` and `rules = { "laravel/prefer-request-facade" = "off" }`), or leave the files out of every lint rule with `[lint] exclude = ["tests/bootstrap.php"]`.
+
 ## Configuration
 
 ```toml title="pun.toml"
