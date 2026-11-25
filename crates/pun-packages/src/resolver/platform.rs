@@ -276,13 +276,37 @@ fn stamp(path: &Path) -> Value {
 
 /// The program `PATH` runs for `name`, resolved through symlinks.
 fn which(name: &str) -> Option<PathBuf> {
-    if name.contains('/') {
-        return std::fs::canonicalize(name).ok();
+    if name.contains('/') || name.contains('\\') {
+        return pun_tokens::php_compat::canonicalize(name).ok();
     }
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|dir| dir.join(name))
-        .find(|p| p.is_file())
-        .and_then(|p| std::fs::canonicalize(p).ok())
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        for candidate in which_candidates(&dir, name) {
+            if candidate.is_file() {
+                return pun_tokens::php_compat::canonicalize(candidate).ok();
+            }
+        }
+    }
+    None
+}
+
+fn which_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
+    #[cfg(not(windows))]
+    {
+        vec![dir.join(name)]
+    }
+    #[cfg(windows)]
+    {
+        let mut out = vec![dir.join(name)];
+        if !name.contains('.') {
+            let pathext =
+                std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+            for ext in pathext.split(';').filter(|s| !s.is_empty()) {
+                out.push(dir.join(format!("{name}{ext}")));
+            }
+        }
+        out
+    }
 }
 
 /// The php.ini files PHP loaded, as Composer's `IniHelper::getAll` lists them in its hints.
@@ -465,6 +489,7 @@ mod tests {
 
     /// The cached probe is reused until one of its inputs changes, and a directory PHP is told to scan for ini files
     /// that doesn't exist yet is an input too: creating it re-probes.
+    #[cfg(unix)]
     #[test]
     fn the_probe_is_cached_until_an_input_changes() {
         use std::os::unix::fs::PermissionsExt;

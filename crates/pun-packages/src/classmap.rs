@@ -525,7 +525,7 @@ fn list(job: &Job) -> Result<Listing> {
     let dir = Path::new(&job.dir);
     let mut files = vec![];
     let mut cacheable = true;
-    match std::fs::canonicalize(dir) {
+    match pun_tokens::php_compat::canonicalize(dir) {
         Ok(real) if dir.is_file() => files.push((job.dir.clone(), real)),
         Ok(real) if dir.is_dir() => {
             cacheable = walk(&job.dir, &real, &mut files, &mut vec![real.clone()]);
@@ -564,7 +564,7 @@ fn list(job: &Job) -> Result<Listing> {
 fn cached(job: &Job, file: &Path) -> Option<Listing> {
     let entries: Vec<(String, Vec<String>)> =
         serde_json::from_slice(&std::fs::read(file).ok()?).ok()?;
-    let real = std::fs::canonicalize(&job.dir).ok()?;
+    let real = pun_tokens::php_compat::canonicalize(&job.dir).ok()?;
     let (mut files, mut classes) = (vec![], vec![]);
     for (rel, found) in entries {
         if rel.is_empty() {
@@ -621,7 +621,10 @@ fn walk(
         let Ok(kind) = e.file_type() else { continue };
         let (is_dir, real) = if kind.is_symlink() {
             plain = false;
-            match (std::fs::metadata(&path), std::fs::canonicalize(&path)) {
+            match (
+                std::fs::metadata(&path),
+                pun_tokens::php_compat::canonicalize(&path),
+            ) {
                 (Ok(m), Ok(target)) => (m.is_dir(), target),
                 _ => continue,
             }
@@ -714,6 +717,7 @@ $x = 'unterminated class Fake5 {}
     }
 
     /// A file the scan can't read is the same error with the class cache as without it, and nothing is kept.
+    #[cfg(unix)]
     #[test]
     fn an_unreadable_file_is_not_cached() {
         use std::os::unix::fs::PermissionsExt;
@@ -746,6 +750,7 @@ $x = 'unterminated class Fake5 {}
         std::fs::remove_dir_all(&t).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn scans_like_composer() {
         let t = std::env::temp_dir().join(format!("pun-classmap-scan-{}", std::process::id()));
@@ -838,6 +843,7 @@ $x = 'unterminated class Fake5 {}
 
     /// Four links back to the directory itself: following each again gave 4^40 paths before the kernel's link
     /// limit stopped it. Each is a cycle, so the class is listed once, at its own path.
+    #[cfg(unix)]
     #[test]
     fn links_back_to_an_ancestor_are_not_walked_again() {
         let t = std::env::temp_dir().join(format!("pun-classmap-cycle-{}", std::process::id()));

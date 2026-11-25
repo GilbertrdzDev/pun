@@ -4,11 +4,43 @@ use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::hash::{BuildHasher, Hasher};
 use std::io::Read;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::path::{Component, Path};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(not(windows))]
+use std::path::Component;
+use std::path::Path;
 use std::process::Command;
 
-const REPO: &str = "shipfastlabs/pun";
+/// Linux and macOS binaries are the upstream release. Windows binaries are published by this fork.
+fn repo() -> &'static str {
+    #[cfg(windows)]
+    {
+        "GilbertrdzDev/pun"
+    }
+    #[cfg(not(windows))]
+    {
+        "shipfastlabs/pun"
+    }
+}
+
+fn archive_name(target: &str) -> String {
+    #[cfg(windows)]
+    {
+        let _ = target;
+        "pun-windows-x86_64.zip".to_string()
+    }
+    #[cfg(not(windows))]
+    {
+        format!("punphp-{target}.tar.gz")
+    }
+}
+
+/// A standalone install is `pun` (or `pun.exe`). Composer names its copy `pun-<version>-<target>`.
+fn standalone_pun(name: &std::ffi::OsStr) -> bool {
+    let n = name.to_string_lossy();
+    let stem = n.strip_suffix(".exe").unwrap_or(&n);
+    stem.eq_ignore_ascii_case("pun")
+}
 
 #[derive(clap::Args)]
 pub(crate) struct SelfUpdateArgs {
@@ -20,10 +52,9 @@ pub(crate) struct SelfUpdateArgs {
 }
 
 pub(crate) fn run(a: &SelfUpdateArgs) -> Result<Exit> {
-    let exe = std::env::current_exe()?
-        .canonicalize()
+    let exe = pun_tokens::php_compat::canonicalize(std::env::current_exe()?)
         .context("can't find the running pun")?;
-    if exe.file_name().is_none_or(|n| n != "pun") {
+    if !standalone_pun(exe.file_name().unwrap_or_default()) {
         bail!(
             "this pun was installed with Composer; update it with `composer update shipfastlabs/pun`"
         );
@@ -56,8 +87,8 @@ pub(crate) fn run(a: &SelfUpdateArgs) -> Result<Exit> {
     }
 
     let target = target()?;
-    let archive = format!("punphp-{target}.tar.gz");
-    let url = format!("{web}/{REPO}/releases/download/{tag}/{archive}");
+    let archive = archive_name(&target);
+    let url = format!("{web}/{}/releases/download/{tag}/{archive}", repo());
     eprintln!("Downloading pun {version} for {target}");
     let bytes = get(&agent, &url)?;
     let sums = String::from_utf8(get(&agent, &format!("{url}.sha256"))?).unwrap_or_default();
@@ -77,6 +108,7 @@ pub(crate) fn run(a: &SelfUpdateArgs) -> Result<Exit> {
     std::fs::write(&staged, &binary)
         .with_context(|| format!("can't write to {}", dir.display()))?;
     let result = (|| {
+        #[cfg(unix)]
         std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
         let out = Command::new(&staged)
             .arg("--version")
@@ -86,7 +118,7 @@ pub(crate) fn run(a: &SelfUpdateArgs) -> Result<Exit> {
         if reported != format!("pun {version}") {
             bail!("the downloaded pun reports '{reported}', not 'pun {version}'");
         }
-        std::fs::rename(&staged, &exe).with_context(|| format!("can't replace {}", exe.display()))
+        install_over(&staged, &exe)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&staged);
@@ -121,7 +153,7 @@ fn valid_tag(tag: &str) -> bool {
 /// The latest stable release, else the newest pre-release; github.com's latest release when the API's rate limit is
 /// used up.
 fn latest(agent: &ureq::Agent, web: &str, api: &str) -> Result<String> {
-    let api = format!("{api}/repos/{REPO}/releases");
+    let api = format!("{api}/repos/{}/releases", repo());
     for url in [format!("{api}/latest"), format!("{api}?per_page=1")] {
         let Ok(body) = get(agent, &url) else { continue };
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
@@ -133,7 +165,7 @@ fn latest(agent: &ureq::Agent, web: &str, api: &str) -> Result<String> {
     // When the API's rate limit is used up: github.com's releases/latest, which has none, redirects to the newest
     // published release (to /releases without one). The releases feed would also name a tag whose release is
     // still building, with no archives to download yet.
-    let url = format!("{web}/{REPO}/releases/latest");
+    let url = format!("{web}/{}/releases/latest", repo());
     let res = (agent.get(&url).config().max_redirects(0).build().call())
         .with_context(|| format!("download failed: {url}"))?;
     (res.headers().get("location"))
@@ -195,7 +227,10 @@ fn target() -> Result<String> {
     Ok(format!("{arch}-apple-darwin"))
 }
 
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(all(
+    not(any(target_arch = "x86_64", target_arch = "aarch64")),
+    not(windows)
+))]
 fn target() -> Result<String> {
     bail!(
         "unsupported CPU architecture {} (Pun ships x86_64 and aarch64 binaries)",
@@ -203,15 +238,62 @@ fn target() -> Result<String> {
     )
 }
 
+#[cfg(all(windows, target_arch = "x86_64"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the other platforms' target() fails"
+)]
+fn target() -> Result<String> {
+    Ok("x86_64-pc-windows-msvc".to_string())
+}
+
+#[cfg(all(windows, not(target_arch = "x86_64")))]
+fn target() -> Result<String> {
+    bail!(
+        "unsupported CPU architecture {} (the Windows build is x86_64)",
+        std::env::consts::ARCH
+    )
+}
+
 #[cfg(all(
     any(target_arch = "x86_64", target_arch = "aarch64"),
-    not(any(target_os = "linux", target_os = "macos"))
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows"))
 ))]
 fn target() -> Result<String> {
     bail!(
-        "unsupported OS {} (Pun ships Linux and macOS binaries)",
+        "unsupported OS {} (Pun ships Linux, macOS and Windows binaries)",
         std::env::consts::OS
     )
+}
+
+/// Puts `staged` in place of the running binary. Windows will not overwrite a running executable, so the
+/// running file is renamed aside first (the process keeps that file) and the new one takes its path.
+fn install_over(staged: &Path, exe: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        std::fs::rename(staged, exe).with_context(|| format!("can't replace {}", exe.display()))
+    }
+    #[cfg(windows)]
+    {
+        let backup = exe.with_file_name(format!(
+            ".{}.old",
+            exe.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        let _ = std::fs::remove_file(&backup);
+        std::fs::rename(exe, &backup)
+            .with_context(|| format!("can't replace {}", exe.display()))?;
+        if let Err(error) = std::fs::rename(staged, exe) {
+            let _ = std::fs::rename(&backup, exe);
+            return Err(error).with_context(|| format!("can't replace {}", exe.display()));
+        }
+        if std::fs::remove_file(&backup).is_err() {
+            eprintln!(
+                " · left the previous binary at {} (Windows keeps a running executable until it exits)",
+                backup.display()
+            );
+        }
+        Ok(())
+    }
 }
 
 /// GitHub's build attestation: proof the archive came from the release workflow for `tag` on a GitHub-hosted runner,
@@ -235,7 +317,13 @@ fn attestation(bytes: &[u8], archive: &str, tag: &str) -> Result<()> {
         .build_hasher()
         .finish();
     let dir = std::env::temp_dir().join(format!("pun-{}-{random:016x}", std::process::id()));
-    std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+    #[cfg(unix)]
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    #[cfg(windows)]
+    let builder = std::fs::DirBuilder::new();
+    builder.create(&dir)?;
     let file = dir.join(archive);
     if let Err(e) = std::fs::write(&file, bytes) {
         let _ = std::fs::remove_dir_all(&dir);
@@ -244,12 +332,7 @@ fn attestation(bytes: &[u8], archive: &str, tag: &str) -> Result<()> {
     let status = Command::new("gh")
         .args(["attestation", "verify"])
         .arg(&file)
-        .args([
-            "--repo",
-            REPO,
-            "--signer-workflow",
-            &format!("github.com/{REPO}/.github/workflows/release.yml"),
-        ])
+        .args(["--repo", repo(), "--signer-workflow", &signer_workflow()])
         .args([
             "--source-ref",
             &format!("refs/tags/{tag}"),
@@ -266,8 +349,59 @@ fn attestation(bytes: &[u8], archive: &str, tag: &str) -> Result<()> {
     Ok(())
 }
 
-/// The `pun` binary from the archive, which may hold only regular files and directories under `punphp-<target>/`.
+fn signer_workflow() -> String {
+    #[cfg(windows)]
+    {
+        format!(
+            "github.com/{}/.github/workflows/release-windows.yml",
+            repo()
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        format!("github.com/{}/.github/workflows/release.yml", repo())
+    }
+}
+
+/// The `pun` binary from the release archive.
 fn extract(bytes: &[u8], target: &str) -> Result<Vec<u8>> {
+    #[cfg(windows)]
+    {
+        let _ = target;
+        extract_zip(bytes)
+    }
+    #[cfg(not(windows))]
+    {
+        extract_tar(bytes, target)
+    }
+}
+
+/// `pun.exe` from `pun-windows-x86_64.zip`. Entries may sit at the archive root or one directory down.
+/// A path that escapes the archive is refused.
+#[cfg(windows)]
+fn extract_zip(bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+        .context("the download is not a zip archive")?;
+    let mut binary = None;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        let name = entry.name()?.replace('\\', "/");
+        if name.contains("..") || name.starts_with('/') || name.contains(':') {
+            bail!("it holds an unexpected path: {name}");
+        }
+        let file = name.rsplit('/').next().unwrap_or(name.as_str());
+        if entry.is_file() && file.eq_ignore_ascii_case("pun.exe") {
+            let mut data = vec![];
+            entry.read_to_end(&mut data)?;
+            binary = Some(data);
+        }
+    }
+    binary.context("it holds no pun.exe")
+}
+
+/// The `pun` binary from the archive, which may hold only regular files and directories under `punphp-<target>/`.
+#[cfg(not(windows))]
+fn extract_tar(bytes: &[u8], target: &str) -> Result<Vec<u8>> {
     let top = format!("punphp-{target}");
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
     let mut binary = None;

@@ -227,7 +227,7 @@ impl ProjectFiles {
                 // working directory.
                 let (archive, rest) = inner.split_once(".phar/")?;
                 let archive = normalize_path(&format!("{}/{archive}.phar", self.cwd));
-                let real = std::fs::canonicalize(&archive)
+                let real = pun_tokens::php_compat::canonicalize(&archive)
                     .map_or(archive, |p| normalize_path(&p.to_string_lossy()));
                 (real == self.phar).then_some(rest)
             })?;
@@ -289,7 +289,7 @@ fn get<'a>(a: &'a Array, path: &[&str]) -> Option<&'a Value> {
 }
 
 pub fn resolve(o: &Options) -> Result<Resolved, Error> {
-    let phar = std::fs::canonicalize(&o.phar)
+    let phar = pun_tokens::php_compat::canonicalize(&o.phar)
         .map_or_else(|_| o.phar.clone(), |p| p.to_string_lossy().into_owned());
     let files = ProjectFiles::new(&phar, &o.cwd);
     resolve_with(&Options { phar, ..o.clone() }, &files)

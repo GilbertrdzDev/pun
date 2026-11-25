@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Runs the harness binary against a throwaway root (`PUN_HARNESS_ROOT`) that borrows the real
 //! .oracle/ and scripts/ but has its own two-project corpus. Expected counts and diffs are
 //! hand-derived from the corpus below: Pint (laravel preset) turns `array(...)` into `[...]`.

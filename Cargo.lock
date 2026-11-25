@@ -2118,6 +2118,7 @@ dependencies = [
  "toml",
  "ureq",
  "walkdir",
+ "zip",
 ]
 
 [[package]]

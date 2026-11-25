@@ -1186,6 +1186,7 @@ fn explain_names() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn files_paths_stay_in_the_project() {
     let d = dir(&[]);

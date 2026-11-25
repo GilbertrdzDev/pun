@@ -21,6 +21,7 @@ use crate::lock::LockedPackage;
 use crate::php::sha256;
 use rayon::prelude::*;
 use serde_json::Value;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -48,6 +49,14 @@ impl LinkMode {
 /// The process's umask, read once before any thread creates files.
 static UMASK: LazyLock<u32> = LazyLock::new(umask);
 
+#[cfg(windows)]
+fn umask() -> u32 {
+    // Windows has no umask. The store key still records one so a cache built on either OS does not collide
+    // with the other's layout when the same machine shares a directory (a dual-boot checkout).
+    0o022
+}
+
+#[cfg(unix)]
 #[cfg_attr(
     target_os = "linux",
     expect(clippy::useless_conversion, reason = "mode_t is u16 on macOS")
@@ -182,7 +191,7 @@ impl Store {
                     return self.link_tree(&src, &dst, stored);
                 }
                 if kind.is_symlink() {
-                    std::os::unix::fs::symlink(std::fs::read_link(&src)?, &dst)?;
+                    crate::fetch::symlink_or_copy(&std::fs::read_link(&src)?, &dst)?;
                 } else if stored
                     .is_some_and(|t| e.metadata().and_then(|m| m.modified()).is_ok_and(|m| m > t))
                 {
@@ -212,6 +221,12 @@ impl Store {
     }
 }
 
+#[cfg(windows)]
+fn same_mode(_meta: &std::fs::Metadata, _path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
 fn same_mode(meta: &std::fs::Metadata, path: &Path) -> std::io::Result<()> {
     let want = meta.mode() & 0o7777;
     if std::fs::metadata(path)?.mode() & 0o7777 != want {
@@ -221,6 +236,14 @@ fn same_mode(meta: &std::fs::Metadata, path: &Path) -> std::io::Result<()> {
 }
 
 /// A copy-on-write clone of `src` at `dst`, or the error of a filesystem that can't make one.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn clone(_src: &Path, _dst: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "this system has no copy-on-write clone",
+    ))
+}
+
 #[cfg(target_os = "linux")]
 fn clone(src: &Path, dst: &Path) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
@@ -294,6 +317,7 @@ mod tests {
 
     /// Each mode gives the same files, modes and symlinks; only hardlinks share the store's inodes, and a failed
     /// fill leaves neither an entry nor a target behind.
+    #[cfg(unix)]
     #[test]
     fn every_mode_links_the_same_tree() {
         let t = std::env::temp_dir().join(format!("pun-store-{}", std::process::id()));
@@ -378,6 +402,7 @@ mod tests {
     /// A directory keeps the mode it was extracted with (a 0700 or a read-only 0555 one too); another
     /// process storing the same entry first wins without an error; an entry that can't be read fails the install
     /// and leaves no temporary directory in `vendor/`.
+    #[cfg(unix)]
     #[test]
     fn modes_races_and_unreadable_entries() {
         let t = std::env::temp_dir().join(format!("pun-store-race-{}", std::process::id()));

@@ -1194,7 +1194,7 @@ impl InstalledPackages {
                 };
                 let path_package = p["dist"]["type"].as_str() == Some("path");
                 let at = normalize_path(&format!("{vendor}/composer/{path}"));
-                if let Ok(real) = std::fs::canonicalize(&at) {
+                if let Ok(real) = pun_tokens::php_compat::canonicalize(&at) {
                     let real = normalize_path(&real.to_string_lossy());
                     if real != at {
                         packages.push((real, path_package));

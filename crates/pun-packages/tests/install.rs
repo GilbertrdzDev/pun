@@ -1,3 +1,4 @@
+#![cfg(unix)]
 use pun_packages::autoload::{Apcu, Dumped, DumpedFile, Scan};
 use pun_packages::fetch::{Auth, Fetcher};
 use pun_packages::install::{Added, Options, Report, Updated, dump_autoload, install};

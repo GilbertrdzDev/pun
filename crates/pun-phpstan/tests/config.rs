@@ -4,7 +4,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::common::{dumped, fixture, placeholders};
+#[cfg(unix)]
+use crate::common::fixture;
+use crate::common::{dumped, placeholders};
 use pun_phpstan::config::{Options, resolve};
 use serde_json::{Value as J, json};
 
@@ -117,6 +119,7 @@ fn edge_case_configs() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn corpus_configs() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))

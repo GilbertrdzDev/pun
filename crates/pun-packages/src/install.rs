@@ -6,7 +6,7 @@ use crate::fetch::{Fetcher, link_path, remove, unpack};
 use crate::fingerprint::{self, Pending, Recorded};
 use crate::installed::{Installed, installed_json, installed_php, read_installed, root};
 use crate::lock::{Lock, LockedPackage, content_hash};
-use crate::paths::normalize;
+use crate::paths::{is_absolute, normalize};
 use crate::php::{md5, sha1};
 use crate::plugin_host;
 use crate::plugins;
@@ -87,7 +87,7 @@ fn config_bool(config: &Map<String, Value>, key: &str) -> bool {
 
 fn config_path(base: &str, value: &str, vendor: &str) -> String {
     let value = value.replace("{$vendor-dir}", vendor);
-    normalize(&if value.starts_with('/') {
+    normalize(&if is_absolute(&value) {
         value
     } else {
         format!("{base}/{value}")
@@ -119,9 +119,9 @@ pub fn install(
     env: Env,
     events: &mut dyn FnMut(&str) -> Result<()>,
 ) -> Result<Report> {
-    let dir =
-        std::fs::canonicalize(base).with_context(|| format!("can't open {}", base.display()))?;
-    let dir_str = dir.to_string_lossy().into_owned();
+    let dir = pun_tokens::php_compat::canonicalize(base)
+        .with_context(|| format!("can't open {}", base.display()))?;
+    let dir_str = dir.to_string_lossy().replace('\\', "/");
     let project = Project {
         dirs: dirs(&dir_str, manifest),
         dir,
@@ -240,9 +240,9 @@ pub fn dump_autoload(
     dev: Option<bool>,
     events: &mut dyn FnMut(&str, bool) -> Result<()>,
 ) -> Result<DumpReport> {
-    let dir =
-        std::fs::canonicalize(base).with_context(|| format!("can't open {}", base.display()))?;
-    let dir_str = dir.to_string_lossy().into_owned();
+    let dir = pun_tokens::php_compat::canonicalize(base)
+        .with_context(|| format!("can't open {}", base.display()))?;
+    let dir_str = dir.to_string_lossy().replace('\\', "/");
     let project = Project {
         dirs: dirs(&dir_str, manifest),
         dir,
@@ -505,6 +505,14 @@ fn compare(
 
 /// Whether the first file found below `dir` has another hardlink: the store links every file of a package the same
 /// way. A symlinked `dir` (a path repository's) is not a store's.
+/// `Metadata::number_of_links` is unstable on Windows, so a store install is not recognized by its link count.
+/// Files are still hardlinked when the filesystem allows it (`std::fs::hard_link` in the store).
+#[cfg(windows)]
+fn hardlinked(_dir: &Path) -> bool {
+    false
+}
+
+#[cfg(unix)]
 fn hardlinked(dir: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     if !std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir()) {
@@ -528,7 +536,7 @@ fn hardlinked(dir: &Path) -> bool {
 /// `vendor`, so that placing or removing a package never reaches another directory. `dir` itself may be a symlink
 /// (a path repository's): it is replaced or unlinked, not followed.
 fn confined(vendor: &str, dir: &Path) -> Result<()> {
-    let Ok(root) = std::fs::canonicalize(vendor) else {
+    let Ok(root) = pun_tokens::php_compat::canonicalize(vendor) else {
         return Ok(());
     };
     for at in dir.ancestors().skip(1) {
@@ -536,7 +544,7 @@ fn confined(vendor: &str, dir: &Path) -> Result<()> {
             break;
         }
         if std::fs::symlink_metadata(at).is_ok() {
-            if !std::fs::canonicalize(at).is_ok_and(|real| real.starts_with(&root)) {
+            if !pun_tokens::php_compat::canonicalize(at).is_ok_and(|real| real.starts_with(&root)) {
                 bail!(
                     "{} is a symlink that leads outside {vendor}, so Pun won't write or remove {} through it",
                     at.display(),

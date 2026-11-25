@@ -49,6 +49,9 @@ pcre2.workspace = true
 notify.workspace = true
 dialoguer.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+zip = { workspace = true, features = ["deflate-flate2"] }
+
 [features]
 pprof = ["dep:pprof"]
 

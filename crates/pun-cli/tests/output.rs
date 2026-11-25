@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Output. Pun's own human output (format.md §9, output.md §1) against the plan's samples, derived by hand, with and
 //! without colour, piped and on a terminal. Byte-for-byte parity with the real Pint (`php .oracle/pint/builds/pint`)
 //! for what stays Pint's: exit codes, resulting files, every `--format` reporter (Pint's `--ansi`, which Pun spells

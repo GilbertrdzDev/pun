@@ -353,6 +353,7 @@ pub fn preg_quote(s: &[u8], delimiter: Option<u8>) -> Vec<u8> {
     out
 }
 
+#[cfg(unix)]
 pub fn fnmatch(pattern: &[u8], string: &[u8]) -> bool {
     use std::ffi::CString;
     CString::new(pattern)
@@ -362,9 +363,105 @@ pub fn fnmatch(pattern: &[u8], string: &[u8]) -> bool {
         .is_some_and(|(p, s)| unsafe { libc::fnmatch(p.as_ptr(), s.as_ptr(), 0) == 0 })
 }
 
+/// POSIX `fnmatch` with no flags (`*` matches `/`), for Windows where libc has no `fnmatch`.
+#[cfg(windows)]
+pub fn fnmatch(pattern: &[u8], string: &[u8]) -> bool {
+    if pattern.contains(&0) || string.contains(&0) {
+        return false;
+    }
+    fn class_match(class: &[u8], c: u8) -> bool {
+        let (negate, class) = match class.split_first() {
+            Some((b'!', rest)) => (true, rest),
+            _ => (false, class),
+        };
+        let mut i = 0;
+        let mut hit = false;
+        while i < class.len() {
+            if i + 2 < class.len() && class[i + 1] == b'-' {
+                if (class[i]..=class[i + 2]).contains(&c) {
+                    hit = true;
+                    break;
+                }
+                i += 3;
+            } else {
+                if class[i] == c {
+                    hit = true;
+                    break;
+                }
+                i += 1;
+            }
+        }
+        hit != negate
+    }
+    fn rec(pattern: &[u8], string: &[u8]) -> bool {
+        let (mut pattern, mut string) = (pattern, string);
+        loop {
+            match pattern.split_first() {
+                None => return string.is_empty(),
+                Some((b'\\', rest)) => {
+                    let Some((escaped, rest)) = rest.split_first() else {
+                        return false;
+                    };
+                    let Some((c, srest)) = string.split_first() else {
+                        return false;
+                    };
+                    if c != escaped {
+                        return false;
+                    }
+                    pattern = rest;
+                    string = srest;
+                }
+                Some((b'*', rest)) => {
+                    return (0..=string.len()).any(|i| rec(rest, &string[i..]));
+                }
+                Some((b'?', rest)) => {
+                    let Some((_, srest)) = string.split_first() else {
+                        return false;
+                    };
+                    pattern = rest;
+                    string = srest;
+                }
+                Some((b'[', rest)) => {
+                    let Some(end) = rest.iter().position(|c| *c == b']').filter(|i| *i > 0) else {
+                        let Some((c, srest)) = string.split_first() else {
+                            return false;
+                        };
+                        if *c != b'[' {
+                            return false;
+                        }
+                        pattern = rest;
+                        string = srest;
+                        continue;
+                    };
+                    let Some((c, srest)) = string.split_first() else {
+                        return false;
+                    };
+                    if !class_match(&rest[..end], *c) {
+                        return false;
+                    }
+                    pattern = &rest[end + 1..];
+                    string = srest;
+                }
+                Some((c, rest)) => {
+                    let Some((sc, srest)) = string.split_first() else {
+                        return false;
+                    };
+                    if sc != c {
+                        return false;
+                    }
+                    pattern = rest;
+                    string = srest;
+                }
+            }
+        }
+    }
+    rec(pattern, string)
+}
+
 /// PHP's `glob($pattern)` without flags: the C library's sorted matches, or an empty list when
 /// nothing matches. Without `GLOB_ERR`, the C library skips unreadable folders, so PHP's `false`
 /// comes only from a pattern with a NUL byte (a `ValueError` in PHP) or from no memory.
+#[cfg(unix)]
 pub fn glob(pattern: &[u8]) -> Vec<Vec<u8>> {
     use std::ffi::{CStr, CString};
     let Ok(pattern) = CString::new(pattern) else {
@@ -384,6 +481,90 @@ pub fn glob(pattern: &[u8]) -> Vec<Vec<u8>> {
     // SAFETY: found came from one glob call and is released once.
     unsafe { libc::globfree(&raw mut found) };
     paths
+}
+
+/// PHP's `glob($pattern)` on Windows: the same `*`, `?` and `[...]` as `fnmatch`, `/` or `\`.
+#[cfg(windows)]
+pub fn glob(pattern: &[u8]) -> Vec<Vec<u8>> {
+    let Ok(pattern) = std::str::from_utf8(pattern) else {
+        return Vec::new();
+    };
+    if pattern.is_empty() {
+        return Vec::new();
+    }
+    let pattern = pattern.replace('\\', "/");
+    let bytes = pattern.as_bytes();
+    let drive =
+        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/';
+    let (base, rest, absolute) = if let Some(stripped) = pattern.strip_prefix('/') {
+        (std::path::PathBuf::from("/"), stripped.to_string(), true)
+    } else if drive {
+        (
+            std::path::PathBuf::from(format!("{}/", &pattern[..2])),
+            pattern[3..].to_string(),
+            true,
+        )
+    } else {
+        (std::path::PathBuf::from("."), pattern.clone(), false)
+    };
+    let parts: Vec<&str> = rest.split('/').filter(|p| !p.is_empty()).collect();
+    let mut out = Vec::new();
+    walk_glob(&base, &parts, absolute, &mut out);
+    out.sort();
+    out
+}
+
+#[cfg(windows)]
+fn walk_glob(dir: &std::path::Path, parts: &[&str], absolute: bool, out: &mut Vec<Vec<u8>>) {
+    let Some((head, tail)) = parts.split_first() else {
+        return;
+    };
+    let magic = head.bytes().any(|b| matches!(b, b'*' | b'?' | b'['));
+    let mut paths = Vec::new();
+    if magic {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let text = name.to_string_lossy();
+            if fnmatch(head.as_bytes(), text.as_bytes()) {
+                paths.push(entry.path());
+            }
+        }
+    } else {
+        paths.push(dir.join(head));
+    }
+    for path in paths {
+        if tail.is_empty() {
+            if path.exists() {
+                let mut text = path.to_string_lossy().replace('\\', "/");
+                if !absolute && let Some(stripped) = text.strip_prefix("./") {
+                    text = stripped.to_string();
+                }
+                out.push(text.into_bytes());
+            }
+        } else if path.is_dir() {
+            walk_glob(&path, tail, absolute, out);
+        }
+    }
+}
+
+/// `std::fs::canonicalize`, but on Windows without the `\\?\` verbatim prefix. The rest of Pun compares
+/// paths as text with `/`, and that prefix breaks every `starts_with` and `strip_prefix`.
+pub fn canonicalize(path: impl AsRef<std::path::Path>) -> std::io::Result<std::path::PathBuf> {
+    let real = std::fs::canonicalize(path)?;
+    #[cfg(windows)]
+    {
+        let text = real.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return Ok(std::path::PathBuf::from(format!(r"\\{rest}")));
+        }
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            return Ok(std::path::PathBuf::from(rest.to_string()));
+        }
+    }
+    Ok(real)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -707,6 +888,46 @@ mod tests {
             mb_strtoupper(b"stra\xc3\x9fe_\xc3\xa9\xffx"),
             "STRASSE_É?X".as_bytes()
         );
+    }
+
+    #[test]
+    fn canonicalize_resolves_an_existing_file() {
+        let dir = std::env::temp_dir().join(format!("pun-canon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let got = canonicalize(&file).unwrap();
+        assert!(got.ends_with("a.txt"), "{got:?}");
+        assert!(!got.to_string_lossy().starts_with(r"\\?\"));
+        assert!(canonicalize(dir.join("missing")).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fnmatch_and_glob_follow_php() {
+        assert!(fnmatch(b"src/*.php", b"src/A.php"));
+        assert!(fnmatch(b"a?", b"ab"));
+        assert!(!fnmatch(b"a?", b"abc"));
+        assert!(fnmatch(br"a\*", b"a*"));
+        assert!(fnmatch(b"[!a]b", b"cb"));
+        assert!(!fnmatch(b"[!a]b", b"ab"));
+        assert!(!fnmatch(b"a\0b", b"ab"));
+        let dir = std::env::temp_dir().join(format!("pun-glob-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/A.php"), b"<?php").unwrap();
+        let pattern = dir.join("src/*.php");
+        let found = glob(pattern.to_string_lossy().as_bytes());
+        assert!(
+            found
+                .iter()
+                .any(|p| String::from_utf8_lossy(p).ends_with("A.php")),
+            "{found:?}"
+        );
+        assert!(glob(b"\xff").is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
