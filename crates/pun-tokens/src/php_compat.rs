@@ -366,8 +366,31 @@ pub fn fnmatch(pattern: &[u8], string: &[u8]) -> bool {
 /// POSIX `fnmatch` with no flags (`*` matches `/`), for Windows where libc has no `fnmatch`.
 #[cfg(windows)]
 pub fn fnmatch(pattern: &[u8], string: &[u8]) -> bool {
-    if pattern.contains(&0) || string.contains(&0) {
-        return false;
+    posix_fnmatch(pattern, string)
+}
+
+/// POSIX `fnmatch` with no flags. `]` just after `[` or `[!` is literal, and `[:class:]` is a character class,
+/// so the bracket ends at the matching `]` rather than the first one (`[[:alpha:]]`, `[]a]`, `[!]a]`).
+#[cfg(any(windows, test))]
+fn posix_fnmatch(pattern: &[u8], string: &[u8]) -> bool {
+    fn posix_class(name: &[u8], c: u8) -> bool {
+        let alpha = c.is_ascii_alphabetic();
+        let digit = c.is_ascii_digit();
+        match name {
+            b"alpha" => alpha,
+            b"digit" => digit,
+            b"alnum" => alpha || digit,
+            b"lower" => c.is_ascii_lowercase(),
+            b"upper" => c.is_ascii_uppercase(),
+            b"xdigit" => c.is_ascii_hexdigit(),
+            b"space" => matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c),
+            b"blank" => matches!(c, b' ' | b'\t'),
+            b"cntrl" => c < 0x20 || c == 0x7f,
+            b"print" => (0x20..0x7f).contains(&c),
+            b"graph" => (0x21..0x7f).contains(&c),
+            b"punct" => (0x21..0x7f).contains(&c) && !alpha && !digit,
+            _ => false,
+        }
     }
     fn class_match(class: &[u8], c: u8) -> bool {
         let (negate, class) = match class.split_first() {
@@ -377,21 +400,66 @@ pub fn fnmatch(pattern: &[u8], string: &[u8]) -> bool {
         let mut i = 0;
         let mut hit = false;
         while i < class.len() {
+            if class[i] == b'['
+                && class.get(i + 1) == Some(&b':')
+                && let Some(rel) = class[i + 2..].windows(2).position(|w| w == b":]")
+            {
+                if posix_class(&class[i + 2..i + 2 + rel], c) {
+                    hit = true;
+                    break;
+                }
+                i += rel + 4;
+                continue;
+            }
+            if class[i] == b'\\' && i + 1 < class.len() {
+                if class[i + 1] == c {
+                    hit = true;
+                    break;
+                }
+                i += 2;
+                continue;
+            }
             if i + 2 < class.len() && class[i + 1] == b'-' {
-                if (class[i]..=class[i + 2]).contains(&c) {
+                let (start, end) = (class[i], class[i + 2]);
+                if end >= start && (start..=end).contains(&c) {
                     hit = true;
                     break;
                 }
                 i += 3;
-            } else {
-                if class[i] == c {
-                    hit = true;
-                    break;
-                }
-                i += 1;
+                continue;
             }
+            if class[i] == c {
+                hit = true;
+                break;
+            }
+            i += 1;
         }
         hit != negate
+    }
+    /// Index of the closing `]` in `rest` (the bytes after `[`), skipping a literal leading `]` and `[:class:]`.
+    fn bracket_end(rest: &[u8]) -> Option<usize> {
+        let mut i = usize::from(rest.first() == Some(&b'!'));
+        if rest.get(i) == Some(&b']') {
+            i += 1;
+        }
+        while i < rest.len() {
+            if rest[i] == b'\\' && i + 1 < rest.len() {
+                i += 2;
+                continue;
+            }
+            if rest[i] == b'['
+                && rest.get(i + 1) == Some(&b':')
+                && let Some(rel) = rest[i + 2..].windows(2).position(|w| w == b":]")
+            {
+                i += rel + 4;
+                continue;
+            }
+            if rest[i] == b']' {
+                return Some(i);
+            }
+            i += 1;
+        }
+        None
     }
     fn rec(pattern: &[u8], string: &[u8]) -> bool {
         let (mut pattern, mut string) = (pattern, string);
@@ -422,7 +490,7 @@ pub fn fnmatch(pattern: &[u8], string: &[u8]) -> bool {
                     string = srest;
                 }
                 Some((b'[', rest)) => {
-                    let Some(end) = rest.iter().position(|c| *c == b']').filter(|i| *i > 0) else {
+                    let Some(end) = bracket_end(rest) else {
                         let Some((c, srest)) = string.split_first() else {
                             return false;
                         };
@@ -454,6 +522,9 @@ pub fn fnmatch(pattern: &[u8], string: &[u8]) -> bool {
                 }
             }
         }
+    }
+    if pattern.contains(&0) || string.contains(&0) {
+        return false;
     }
     rec(pattern, string)
 }
@@ -888,6 +959,43 @@ mod tests {
             mb_strtoupper(b"stra\xc3\x9fe_\xc3\xa9\xffx"),
             "STRASSE_É?X".as_bytes()
         );
+    }
+
+    /// The same cases `tests/php_compat.rs` asks PHP for. The bracket ones are where a first-`]` scan is wrong:
+    /// `[]a]` matches `]`, `[!]a]` matches `b`, and `[[:alpha:]]` matches `a`.
+    #[test]
+    fn posix_fnmatch_matches_the_php_cases() {
+        let cases = [
+            ("*.php", "a.php", true),
+            ("*", "/a/.b", true),
+            ("/a/*", "/a/b/c", true),
+            ("[ab]?", "bc", true),
+            ("a\\*", "a*", true),
+            ("a\\*", "ab", false),
+            ("a[", "a[", true),
+            ("[]a]", "]", true),
+            ("[!]a]", "b", true),
+            ("[a-]", "-", true),
+            ("[\\]]", "]", true),
+            ("[a\\]", "\\", false),
+            ("\\", "\\", false),
+            ("[[:alpha:]]", "a", true),
+            ("[b-a]", "a", false),
+            ("[!a]", "/", true),
+            ("[]a]", "a", true),
+            ("[[:digit:]]", "5", true),
+            ("[[:digit:]]", "a", false),
+            ("[![:alpha:]]", "1", true),
+            ("[[:space:]]", " ", true),
+            ("a\0", "a", false),
+        ];
+        for (pattern, string, want) in cases {
+            assert_eq!(
+                posix_fnmatch(pattern.as_bytes(), string.as_bytes()),
+                want,
+                "{pattern:?} {string:?}"
+            );
+        }
     }
 
     #[test]

@@ -33,6 +33,20 @@ fn is_root(p: &str) -> bool {
     n > 0 && p.len() == n
 }
 
+/// `C:` and `D:` have no shared prefix a `../` walk can cross.
+#[cfg(windows)]
+fn different_drives(from: &str, to: &str) -> bool {
+    let letter = |p: &str| {
+        let b = p.as_bytes();
+        (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':')
+            .then_some(b[0].to_ascii_lowercase())
+    };
+    match (letter(from), letter(to)) {
+        (Some(a), Some(b)) => a != b,
+        _ => false,
+    }
+}
+
 pub fn normalize(path: &str) -> String {
     let path = path.replace('\\', "/");
     let (absolute, rest) = match root_len(&path) {
@@ -83,6 +97,10 @@ pub fn shortest(from: &str, to: &str, directory: bool) -> String {
     if dirname(&from) == dirname(&to) {
         return format!("./{}", basename(&to));
     }
+    #[cfg(windows)]
+    if different_drives(&from, &to) {
+        return to;
+    }
     let common = common(&from, &to);
     let depth = from[common.len()..].matches('/').count();
     if is_root(&common) && depth > 1 {
@@ -105,6 +123,10 @@ pub fn shortest_code(from: &str, to: &str, directory: bool, static_code: bool) -
     let to = normalize(to);
     if from == to {
         return if directory { "__DIR__" } else { "__FILE__" }.into();
+    }
+    #[cfg(windows)]
+    if different_drives(&from, &to) {
+        return export_str(&to);
     }
     let common = common(&from, &to);
     if let Some(rest) = to.strip_prefix(&format!("{from}/")) {
@@ -197,5 +219,12 @@ mod tests {
             "../acme/bin/tool"
         );
         assert_eq!(shortest("C:/proj/a/b", "D:/other", false), "D:/other");
+        assert_eq!(shortest("C:/project", "D:/lib", true), "D:/lib");
+        assert_eq!(shortest("C:/a", "D:/b", false), "D:/b");
+        assert_eq!(shortest("c:/a/b", "C:/a/c", false), "./c");
+        assert_eq!(
+            shortest_code("C:/project", "D:/lib", true, true),
+            "'D:/lib'"
+        );
     }
 }

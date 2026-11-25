@@ -597,9 +597,12 @@ pub fn unpack(kind: &str, bytes: &[u8], target: &Path) -> Result<()> {
             [only] if std::fs::symlink_metadata(only).is_ok_and(|m| m.is_dir()) => (*only).clone(),
             _ => tmp.clone(),
         };
-        // Links are checked against the package as installed, below the wrapper.
+        // Links are checked against the package as installed, below the wrapper. A copy made in place of a
+        // symlink (Windows, when creating the link was refused) is not a link: removing it here would delete a
+        // file that stayed inside the package.
         for link in links.iter().filter(|l| l.starts_with(&from)) {
-            if escapes(&from, link) {
+            let is_link = std::fs::symlink_metadata(link).is_ok_and(|m| m.file_type().is_symlink());
+            if is_link && escapes(&from, link) {
                 let _ = std::fs::remove_file(link);
             }
         }
@@ -757,9 +760,7 @@ fn unzip(bytes: &[u8], dir: &Path, used: &AtomicU64) -> Result<Vec<PathBuf>> {
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner))
     .into_iter()
-    .filter(|(path, target)| {
-        !escapes_archive(target) && symlink_or_copy(Path::new(target), path).is_ok()
-    })
+    .filter(|(path, target)| place_archive_link(dir, path, target))
     .map(|(path, _)| path)
     .collect())
 }
@@ -797,6 +798,70 @@ fn escapes_archive(target: &str) -> bool {
     }
     let b = slash.as_bytes();
     cfg!(windows) && b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'/'
+}
+
+/// Places one archive symlink at `link`. On Unix that is the symlink. On Windows a symlink needs Developer
+/// Mode or an elevated process; the fallback copy runs only when the target stays lexically inside `root`.
+/// A relative `..` that climbs out of the archive must not be copied into the package.
+fn place_archive_link(root: &Path, link: &Path, target: &str) -> bool {
+    if escapes_archive(target) {
+        return false;
+    }
+    let original = Path::new(target);
+    #[cfg(unix)]
+    {
+        let _ = root;
+        symlink_or_copy(original, link).is_ok()
+    }
+    #[cfg(windows)]
+    {
+        let resolved = link.parent().unwrap_or(root).join(original);
+        let resolved = PathBuf::from(resolved.to_string_lossy().trim_end_matches(['/', '\\']));
+        let directory = std::fs::metadata(&resolved).is_ok_and(|m| m.is_dir());
+        let linked = if directory {
+            std::os::windows::fs::symlink_dir(original, link)
+        } else {
+            std::os::windows::fs::symlink_file(original, link)
+        };
+        if linked.is_ok() {
+            return true;
+        }
+        if !lexical_inside(root, &resolved) {
+            return false;
+        }
+        if directory {
+            copy_tree(&resolved, &resolved, link).is_ok()
+        } else if resolved.is_file() {
+            std::fs::copy(&resolved, link).is_ok()
+        } else {
+            false
+        }
+    }
+}
+
+/// Whether `path`, after resolving `.` and `..` without touching the filesystem, is strictly inside `root`.
+#[cfg(any(windows, test))]
+fn lexical_inside(root: &Path, path: &Path) -> bool {
+    let root = lexical_normalize(root);
+    let path = lexical_normalize(path);
+    path.starts_with(&root) && path != root
+}
+
+#[cfg(any(windows, test))]
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    out.push(component);
+                }
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Creates `link` pointing at `target`. On Unix that is a symlink. On Windows a symlink needs Developer Mode
@@ -885,6 +950,19 @@ mod tests {
     use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    /// A zip symlink's copy fallback may only read a target that stays inside the unpack directory.
+    #[test]
+    fn an_archive_link_cannot_climb_out() {
+        let root = Path::new("/tmp/pkg");
+        assert!(lexical_inside(root, Path::new("/tmp/pkg/src/A.php")));
+        assert!(lexical_inside(root, Path::new("/tmp/pkg/sub/../src/A.php")));
+        assert!(!lexical_inside(root, Path::new("/tmp/pkg/../secret")));
+        assert!(!lexical_inside(root, Path::new("/tmp/pkg")));
+        assert!(!lexical_inside(root, Path::new("/etc/passwd")));
+        assert!(escapes_archive("/etc/passwd"));
+        assert!(!escapes_archive("../secret"));
+    }
 
     #[test]
     fn composer_dirs_match_composer() {
