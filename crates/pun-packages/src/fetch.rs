@@ -826,16 +826,34 @@ fn place_archive_link(root: &Path, link: &Path, target: &str) -> bool {
         if linked.is_ok() {
             return true;
         }
+        // `..` that leaves the unpack directory, and a path that only looks inside until a symlink is
+        // followed, must not be copied into the package.
         if !lexical_inside(root, &resolved) {
             return false;
         }
-        if directory {
-            copy_tree(&resolved, &resolved, link).is_ok()
-        } else if resolved.is_file() {
-            std::fs::copy(&resolved, link).is_ok()
-        } else {
-            false
-        }
+        copy_if_inside(root, link, &resolved)
+    }
+}
+
+/// Copies `resolved` onto `link` only when its canonical path stays inside `root`. The path is resolved on
+/// disk, so a symlink in the middle cannot point the copy at a directory outside the package.
+#[cfg(any(windows, test))]
+fn copy_if_inside(root: &Path, link: &Path, resolved: &Path) -> bool {
+    let Ok(root) = pun_tokens::php_compat::canonicalize(root) else {
+        return false;
+    };
+    let Ok(real) = pun_tokens::php_compat::canonicalize(resolved) else {
+        return false;
+    };
+    if !real.starts_with(&root) || real == root {
+        return false;
+    }
+    if real.is_dir() {
+        copy_tree(&real, &real, link).is_ok()
+    } else if real.is_file() {
+        std::fs::copy(&real, link).is_ok()
+    } else {
+        false
     }
 }
 
@@ -962,6 +980,44 @@ mod tests {
         assert!(!lexical_inside(root, Path::new("/etc/passwd")));
         assert!(escapes_archive("/etc/passwd"));
         assert!(!escapes_archive("../secret"));
+
+        let t = scratch("escape-copy");
+        let unpack = t.join("unpack");
+        let secret = t.join("secret");
+        std::fs::create_dir_all(unpack.join("pkg")).unwrap();
+        std::fs::create_dir_all(&secret).unwrap();
+        std::fs::write(secret.join("marker.txt"), b"secret").unwrap();
+        let stolen = unpack.join("pkg/stolen");
+        let climbed = stolen.parent().unwrap().join("../../secret");
+        assert!(
+            !copy_if_inside(&unpack, &stolen, &climbed),
+            "a .. target outside the package must not be copied"
+        );
+        assert!(!stolen.exists());
+        assert_eq!(std::fs::read(secret.join("marker.txt")).unwrap(), b"secret");
+
+        std::fs::create_dir_all(unpack.join("pkg/src")).unwrap();
+        std::fs::write(unpack.join("pkg/src/A.php"), b"<?php").unwrap();
+        let inside = unpack.join("pkg/copy");
+        assert!(copy_if_inside(
+            &unpack,
+            &inside,
+            &inside.parent().unwrap().join("src")
+        ));
+        assert_eq!(std::fs::read(inside.join("A.php")).unwrap(), b"<?php");
+
+        // Lexically inside the unpack directory, but `jump` is a symlink to the secret directory.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&secret, unpack.join("jump")).unwrap();
+            let via = unpack.join("via");
+            assert!(
+                !copy_if_inside(&unpack, &via, &unpack.join("jump")),
+                "a symlink that resolves outside the package must not be copied"
+            );
+            assert!(!via.exists());
+        }
+        std::fs::remove_dir_all(&t).unwrap();
     }
 
     #[test]

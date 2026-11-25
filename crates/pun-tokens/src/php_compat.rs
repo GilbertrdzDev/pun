@@ -996,6 +996,9 @@ mod tests {
                 "{pattern:?} {string:?}"
             );
         }
+        // `fnmatch` is this implementation on Windows and libc on Unix. Both accept a POSIX class.
+        assert!(fnmatch(b"[[:alpha:]]", b"a"));
+        assert!(!fnmatch(b"[[:alpha:]]", b"1"));
     }
 
     #[test]
