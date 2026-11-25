@@ -434,9 +434,11 @@ fn extract_tar(bytes: &[u8], target: &str) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    #[cfg(not(windows))]
     const T: &str = "x86_64-unknown-linux-musl";
 
     /// A gzip tar of (path, entry type, contents); the path bytes go into the header as they are, `..` included.
+    #[cfg(not(windows))]
     fn archive(entries: &[(&str, tar::EntryType, &[u8])]) -> Vec<u8> {
         let mut out = tar::Builder::new(flate2::write::GzEncoder::new(
             vec![],
@@ -454,6 +456,7 @@ mod tests {
         out.into_inner().unwrap().finish().unwrap()
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn extract_takes_only_the_release_layout() {
         use tar::EntryType::{Directory, Regular, Symlink};
@@ -476,6 +479,33 @@ mod tests {
         );
         assert!(error(&[("/etc/pun", Regular, b"x")]).contains("unexpected path"));
         assert!(error(&[(&format!("{top}LICENSE"), Regular, b"MIT")]).contains("no pun binary"));
+    }
+
+    /// The Windows release is a zip of `pun.exe`, at the root or one directory down. A path that escapes is refused.
+    #[cfg(windows)]
+    #[test]
+    fn extract_takes_only_the_release_zip() {
+        fn packed(files: &[(&str, &[u8])]) -> Vec<u8> {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(vec![]));
+            let options = zip::write::SimpleFileOptions::default();
+            for (name, data) in files {
+                writer.start_file(*name, options).unwrap();
+                std::io::Write::write_all(&mut writer, data).unwrap();
+            }
+            writer.finish().unwrap().into_inner()
+        }
+        assert_eq!(
+            extract(&packed(&[("pun.exe", b"MZ"), ("LICENSE", b"MIT")]), "win").unwrap(),
+            b"MZ"
+        );
+        assert_eq!(
+            extract(&packed(&[("pun/pun.exe", b"MZ")]), "win").unwrap(),
+            b"MZ"
+        );
+        let error =
+            |files: &[(&str, &[u8])]| format!("{:#}", extract(&packed(files), "win").unwrap_err());
+        assert!(error(&[("../pun.exe", b"MZ")]).contains("unexpected path"));
+        assert!(error(&[("LICENSE", b"MIT")]).contains("no pun.exe"));
     }
 
     #[test]

@@ -149,6 +149,9 @@ final class GeneratedConfig
 
 #[test]
 fn reads_level_paths_ignores_and_includes() {
+    // The fixture excludes `/tmp`, which exists on Unix. On Windows that path is the current drive's `\tmp`.
+    #[cfg(windows)]
+    let _ = std::fs::create_dir_all("/tmp");
     let d = project(
         NEON,
         &[

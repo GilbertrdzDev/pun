@@ -100,11 +100,18 @@ impl Files for WithoutBaselines {
 }
 
 fn relative(root: &Path, path: &str) -> String {
-    let root = root.display().to_string();
-    match path.strip_prefix(&root) {
+    // `normalize_path` writes `C:/...`. `Path::display` on Windows writes `C:\...`. Compare both with `/`.
+    let root = root.to_string_lossy().replace('\\', "/");
+    let root = if root.len() > 1 {
+        root.trim_end_matches('/')
+    } else {
+        root.as_str()
+    };
+    let path = path.replace('\\', "/");
+    match path.strip_prefix(root) {
         Some("") => ".".into(),
         Some(r) if r.starts_with('/') => r[1..].trim_end_matches('/').to_string(),
-        _ => path.to_string(),
+        _ => path,
     }
 }
 
@@ -124,7 +131,7 @@ pub fn from_phpstan(root: &Path, config: &Path) -> Result<Phpstan> {
     let cwd = root.display().to_string();
     let mut o = Options::for_project(&cwd);
     o.config = Some(config.display().to_string());
-    let phar = std::fs::canonicalize(&o.phar)
+    let phar = pun_tokens::php_compat::canonicalize(&o.phar)
         .map_or_else(|_| o.phar.clone(), |p| p.to_string_lossy().into_owned());
     o.phar.clone_from(&phar);
     let files = WithoutBaselines {

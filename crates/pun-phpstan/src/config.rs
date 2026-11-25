@@ -737,10 +737,19 @@ fn sys_get_temp_dir_calls(v: &mut Value, tmp: &str) {
 }
 
 fn path_problem(path: &str) -> Option<String> {
-    let exists = path.starts_with('/') && std::path::Path::new(path).exists();
+    let exists = absolute_path(path) && std::path::Path::new(path).exists();
     (!exists && !is_fnmatch_pattern(path)).then(|| {
         format!("Path \"{path}\" is neither a directory, nor a file path, nor a fnmatch pattern.")
     })
+}
+
+/// `/x` on Unix, and `C:/x` or `C:\x` once `normalize_path` has turned a Windows path into slashes.
+fn absolute_path(path: &str) -> bool {
+    if path.starts_with('/') {
+        return true;
+    }
+    let b = path.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
 }
 
 fn validate_exclude_paths(

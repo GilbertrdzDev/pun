@@ -469,7 +469,12 @@ fn columns(text: &str) -> usize {
 
 pub(crate) fn file_url(path: &Path) -> String {
     let mut url = String::from("file://");
-    for &b in path.to_string_lossy().as_bytes() {
+    // File URLs use `/`. A Windows drive (`C:/...`) needs the extra slash of `file:///C:/...`.
+    let mut text = path.to_string_lossy().replace('\\', "/");
+    if text.as_bytes().get(1) == Some(&b':') {
+        text.insert(0, '/');
+    }
+    for &b in text.as_bytes() {
         if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) {
             url.push(b as char);
         } else {
