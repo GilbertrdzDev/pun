@@ -39,7 +39,6 @@ Type: files; Name: "{app}\pun.exe"
 const
   EnvironmentKey = 'Environment';
   WM_SETTINGCHANGE = $001A;
-  HWND_BROADCAST = $FFFF;
   SMTO_ABORTIFHUNG = $0002;
 
 function UserPath(var Path: string): Boolean;
