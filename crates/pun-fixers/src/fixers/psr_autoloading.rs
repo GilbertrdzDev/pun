@@ -19,9 +19,10 @@ pub(crate) fn fixer() -> Box<dyn Fixer> {
 }
 
 fn real_path(path: &Path) -> Option<String> {
-    std::fs::canonicalize(path)
+    // The rest of this fixer splits on `/`, as PHP does. Windows `canonicalize` returns `C:\...` or `\\?\C:\...`.
+    pun_tokens::php_compat::canonicalize(path)
         .ok()
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
 }
 
 fn dirname(path: &str) -> &str {

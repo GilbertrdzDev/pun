@@ -21,3 +21,5 @@ crates/pun-lint/tests/mago/style-require-todo-reference/Mago/*_comment_prefixes_
 /rustfmt.toml export-ignore
 /scripts export-ignore
 /third_party export-ignore
+/install.ps1 export-ignore
+/packaging export-ignore

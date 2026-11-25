@@ -211,12 +211,12 @@ impl Cache {
 /// keep from other accounts.
 fn write(file: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::DirBuilderExt;
     let dir = file.parent().unwrap_or(Path::new("."));
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)?;
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)?;
     let (tmp, mut out) = crate::run::private_sibling(file)?;
     (out.write_all(bytes))
         .and_then(|()| std::fs::rename(&tmp, file))
@@ -508,6 +508,7 @@ mod tests {
 
     /// The cache holds diffs and fixed source, so it is owner-only under a umask that lets others read (022): a new
     /// cache, its new directory, and a save over a cache another version left readable.
+    #[cfg(unix)]
     #[test]
     fn the_cache_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;

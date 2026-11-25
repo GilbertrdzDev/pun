@@ -23,10 +23,7 @@ fn pint_not_name(cfg: &Config) -> Vec<&str> {
 }
 
 fn real_path(cfg: &Config, p: &Path) -> Result<PathBuf, FinderError> {
-    cfg.root
-        .join(p)
-        .canonicalize()
-        .map_err(|_| FinderError::NotReadable(p.to_path_buf()))
+    crate::canonical(&cfg.root.join(p)).map_err(|_| FinderError::NotReadable(p.to_path_buf()))
 }
 
 const PINT_EXCLUDE: [&str; 4] = ["bootstrap/cache", "build", "node_modules", "storage"];
@@ -473,10 +470,19 @@ fn git_names(cfg: &Config, sel: &GitSelect) -> Result<std::collections::HashSet<
             untracked,
         ]),
         GitSelect::Staged => git(&cfg.root, &staged).map(|out| {
-            use std::os::unix::ffi::OsStrExt;
             (out.split(|&b| b == 0))
                 .filter(|n| !n.is_empty())
-                .map(|n| std::ffi::OsStr::from_bytes(n).into())
+                .map(|n| {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::ffi::OsStrExt;
+                        std::ffi::OsStr::from_bytes(n).into()
+                    }
+                    #[cfg(windows)]
+                    {
+                        PathBuf::from(String::from_utf8_lossy(n).into_owned())
+                    }
+                })
                 .collect()
         }),
     };
@@ -496,7 +502,7 @@ fn git_names(cfg: &Config, sel: &GitSelect) -> Result<std::collections::HashSet<
 /// Whether `path` resolves outside `root` (canonical), a dangling symlink included: what is there isn't the project's.
 /// A path with nothing there stays inside.
 pub(crate) fn leaves(root: &Path, path: &Path) -> bool {
-    match path.canonicalize() {
+    match crate::canonical(path) {
         Ok(real) => !real.starts_with(root),
         Err(_) => path.symlink_metadata().is_ok(),
     }

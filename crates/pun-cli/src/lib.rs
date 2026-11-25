@@ -530,7 +530,12 @@ fn ignore_php_constraint() -> bool {
 }
 
 fn root() -> Result<PathBuf> {
-    Ok(std::env::current_dir()?.canonicalize()?)
+    canonical(&std::env::current_dir()?).map_err(Into::into)
+}
+
+/// `Path::canonicalize`, but on Windows without the `\\?\` verbatim prefix.
+pub(crate) fn canonical(path: &std::path::Path) -> std::io::Result<PathBuf> {
+    pun_tokens::php_compat::canonicalize(path)
 }
 
 fn show_config(

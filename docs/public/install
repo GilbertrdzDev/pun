@@ -46,7 +46,10 @@ detect_target() {
             ;;
         # Static musl binaries, so one build runs on glibc and Alpine alike.
         Linux) echo "$arch-unknown-linux-musl" ;;
-        *) fail "unsupported OS $os (Pun ships Linux and macOS binaries)" ;;
+        MINGW* | MSYS* | CYGWIN* | Windows_NT)
+            fail "on Windows, install with PowerShell: irm https://raw.githubusercontent.com/GilbertrdzDev/pun/main/install.ps1 | iex"
+            ;;
+        *) fail "unsupported OS $os (Pun ships Linux, macOS and Windows binaries)" ;;
     esac
 }
 

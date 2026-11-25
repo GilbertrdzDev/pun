@@ -60,6 +60,11 @@ fn every_rule_matches_pint() {
             };
             #[cfg(unix)]
             std::os::unix::fs::symlink(modules, dir.join("node_modules")).unwrap();
+            #[cfg(windows)]
+            if std::os::windows::fs::symlink_dir(modules, dir.join("node_modules")).is_err() {
+                eprintln!("skipping {rule}: Windows could not link node_modules");
+                return failures;
+            }
         }
         let (code, stdout) = pun(&dir, &["check"]);
         if i64::from(code) != case["test_exit"].as_i64().unwrap() {

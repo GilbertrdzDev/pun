@@ -10,7 +10,6 @@ publish.workspace = true
 name = "pun_packages"
 
 [dependencies]
-libc.workspace = true
 md-5.workspace = true
 pcre2.workspace = true
 pun-tokens.workspace = true
@@ -24,6 +23,9 @@ tar.workspace = true
 flate2.workspace = true
 indexmap.workspace = true
 serde.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [lints]
 workspace = true

@@ -1,3 +1,4 @@
+#![cfg(unix)]
 mod common;
 
 use punphp::finder::{Command, Exclusions, FinderError, files, is_path_excluded};

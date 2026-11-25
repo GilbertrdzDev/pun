@@ -95,7 +95,13 @@ fn scripts_dir(cache: Option<PathBuf>, name: &str) -> std::io::Result<PathBuf> {
         return Ok(cache.join(name));
     }
     let dir = std::env::temp_dir().join(format!("pun-{name}-{}", std::process::id()));
-    std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700).create(&dir)?;
+    #[cfg(unix)]
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    #[cfg(windows)]
+    let builder = std::fs::DirBuilder::new();
+    builder.create(&dir)?;
     Ok(dir)
 }
 
@@ -332,9 +338,12 @@ mod tests {
         let name = format!("test-private-{}", std::process::id());
         let private = scripts_dir(None, &name).unwrap();
         assert!(private.starts_with(std::env::temp_dir()));
-        let mode =
-            std::os::unix::fs::PermissionsExt::mode(&private.metadata().unwrap().permissions());
-        assert_eq!(mode & 0o777, 0o700);
+        #[cfg(unix)]
+        {
+            let mode =
+                std::os::unix::fs::PermissionsExt::mode(&private.metadata().unwrap().permissions());
+            assert_eq!(mode & 0o777, 0o700);
+        }
         assert!(scripts_dir(None, &name).is_err());
         std::fs::remove_dir(&private).unwrap();
         assert_eq!(

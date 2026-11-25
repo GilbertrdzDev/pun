@@ -26,7 +26,8 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 /// Pun's cache directory: `PUN_CACHE_DIR`, else the platform's user cache directory (`~/Library/Caches/pun` on
-/// macOS, `$XDG_CACHE_HOME/pun` or `~/.cache/pun` elsewhere). Nothing when neither `PUN_CACHE_DIR` nor `HOME` is set.
+/// macOS, `%LOCALAPPDATA%\pun` on Windows, `$XDG_CACHE_HOME/pun` or `~/.cache/pun` elsewhere). Nothing when the
+/// platform variable and `HOME` are both unset.
 pub fn cache_dir() -> Option<PathBuf> {
     cache_dir_in(|k| std::env::var_os(k), cfg!(target_os = "macos"))
 }
@@ -35,6 +36,10 @@ fn cache_dir_in(var: impl Fn(&str) -> Option<std::ffi::OsString>, macos: bool) -
     let env = |k: &str| var(k).filter(|v| !v.is_empty()).map(PathBuf::from);
     if let Some(dir) = env("PUN_CACHE_DIR") {
         return Some(dir);
+    }
+    #[cfg(windows)]
+    if let Some(local) = env("LOCALAPPDATA") {
+        return Some(local.join("pun"));
     }
     let home = env("HOME")?;
     if macos {
@@ -205,7 +210,10 @@ pub fn from_toml(root: &Path, text: &str) -> Result<Config> {
 }
 
 fn inside(root: &Path, path: &str) -> bool {
-    let (Ok(real), Ok(root)) = (root.join(path).canonicalize(), root.canonicalize()) else {
+    let (Ok(real), Ok(root)) = (
+        pun_tokens::php_compat::canonicalize(root.join(path)),
+        pun_tokens::php_compat::canonicalize(root),
+    ) else {
         return true;
     };
     real.starts_with(root)

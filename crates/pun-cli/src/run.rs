@@ -1157,6 +1157,26 @@ fn process_file(
 /// Swaps `bytes` in for the file at `path` through a private sibling that takes the file's group and mode before the
 /// rename. Without such a sibling (a read-only directory, or a group the sibling can't take) the file is rewritten in
 /// place, which keeps its inode and so its owner, group and mode.
+#[cfg(windows)]
+fn replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let meta = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .metadata()?;
+    let Ok((tmp, mut file)) = private_sibling(path) else {
+        return std::fs::write(path, bytes);
+    };
+    let written = (file.write_all(bytes))
+        .and_then(|()| file.set_permissions(meta.permissions()))
+        .and_then(|()| {
+            drop(file);
+            std::fs::rename(&tmp, path)
+        });
+    written.inspect_err(|_| drop(std::fs::remove_file(&tmp)))
+}
+
+#[cfg(unix)]
 fn replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::MetadataExt;
@@ -1183,13 +1203,13 @@ fn replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// current directory) that leads out of it, or nowhere: a checkout can carry such a link to aim the write elsewhere.
 /// A link outside the project, such as `/dev/stdout`, is the caller's own choice and is written through.
 pub(crate) fn write_generated(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let root = std::env::current_dir()?.canonicalize()?;
+    let root = crate::canonical(&std::env::current_dir()?)?;
     let abs = root.join(path);
     let linked = abs
         .symlink_metadata()
         .is_ok_and(|m| m.file_type().is_symlink());
     let in_project =
-        (abs.parent().and_then(|p| p.canonicalize().ok())).is_some_and(|p| p.starts_with(&root));
+        (abs.parent().and_then(|p| crate::canonical(p).ok())).is_some_and(|p| p.starts_with(&root));
     if linked && in_project && crate::finder::leaves(&root, &abs) {
         return Err(std::io::Error::other(
             "it is a symlink that leads outside the project",
@@ -1202,15 +1222,16 @@ pub(crate) fn write_generated(path: &Path, bytes: &[u8]) -> std::io::Result<()> 
 /// already at that name (a planted symlink included) fails the call instead of receiving the write.
 pub(crate) fn private_sibling(path: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
     use std::hash::{BuildHasher, Hasher};
-    use std::os::unix::fs::OpenOptionsExt;
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let random = std::collections::hash_map::RandomState::new()
         .build_hasher()
         .finish();
     let tmp = path.with_file_name(format!(".{name}.pun-{}-{random:016x}", std::process::id()));
-    let file = (std::fs::OpenOptions::new().write(true).create_new(true))
-        .mode(0o600)
-        .open(&tmp)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let file = options.open(&tmp)?;
     Ok((tmp, file))
 }
 
@@ -1385,6 +1406,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn replace_swaps_the_file_in() {
         use std::os::unix::fs::PermissionsExt;
@@ -1422,6 +1444,7 @@ mod tests {
     /// The staging file is new, owner-only and never an entry that was already there: a symlink planted at the name
     /// staging once used (`.a.php.pun-<pid>`) leaves its target alone, and the sibling starts at 0600 whatever the mode
     /// of the file it stands in for.
+    #[cfg(unix)]
     #[test]
     fn replace_stages_in_a_new_private_file() {
         use std::os::unix::fs::PermissionsExt;
@@ -1448,6 +1471,7 @@ mod tests {
 
     /// In a setgid directory a new file takes the directory's group; the replacement keeps the old file's group, so
     /// the mode bits it copies still apply to the group they applied to. Needs a second group to put the directory in.
+    #[cfg(unix)]
     #[test]
     fn replace_keeps_the_group_in_a_setgid_directory() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};

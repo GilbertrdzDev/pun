@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! The result cache of `pun format`, `lint` and `check`: a file's result is reused only while nothing it depends on
 //! has changed. Each test's cache directory is its own (`common::clean_env`).
 

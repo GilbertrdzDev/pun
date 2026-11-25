@@ -13,6 +13,7 @@ use crate::php::sha1;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::fmt::Write as _;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -91,6 +92,23 @@ pub fn stamp(path: &Path, follow: bool) -> Value {
     meta.map_or(Value::Null, |m| Value::String(identity(&m)))
 }
 
+#[cfg(windows)]
+fn identity(m: &std::fs::Metadata) -> String {
+    let nanos = |t: std::io::Result<std::time::SystemTime>| {
+        t.ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos())
+    };
+    format!(
+        "{}:{}:{}:{}",
+        u8::from(m.is_dir()),
+        m.len(),
+        nanos(m.modified()),
+        nanos(m.created())
+    )
+}
+
+#[cfg(unix)]
 fn identity(m: &std::fs::Metadata) -> String {
     format!(
         "{}:{}:{}:{:o}:{}.{}:{}.{}",
@@ -117,7 +135,18 @@ pub fn tree<S: std::hash::BuildHasher>(
         return;
     };
     let _ = writeln!(out, "{}\t{}", path.display(), identity(&m));
-    if !m.is_dir() || !seen.insert((m.dev(), m.ino())) {
+    #[cfg(unix)]
+    let key = (m.dev(), m.ino());
+    #[cfg(windows)]
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        pun_tokens::php_compat::canonicalize(path)
+            .unwrap_or_else(|_| path.to_path_buf())
+            .hash(&mut hasher);
+        (0, hasher.finish())
+    };
+    if !m.is_dir() || !seen.insert(key) {
         return;
     }
     let mut names: Vec<_> = (std::fs::read_dir(path).into_iter().flatten().flatten())
@@ -172,9 +201,13 @@ mod tests {
             tree(&t.join("src"), &mut out, &mut HashSet::new());
             out
         };
+        #[cfg(unix)]
         std::os::unix::fs::symlink(t.join("src"), t.join("src/sub/loop")).unwrap();
         let before = listing(&t);
+        #[cfg(unix)]
         assert_eq!(before.lines().count(), 4, "{before}");
+        #[cfg(windows)]
+        assert_eq!(before.lines().count(), 3, "{before}");
         assert_eq!(before, listing(&t));
         std::fs::write(t.join("src/sub/B.php"), "<?php class B {}").unwrap();
         assert_ne!(before, listing(&t));

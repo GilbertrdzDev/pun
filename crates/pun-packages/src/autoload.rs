@@ -2,7 +2,7 @@ use crate::classmap::{ClassMap, Job, Rule};
 use crate::constraint::{Bound, lower_bound};
 use crate::error::{Error, Result};
 use crate::installed::Installed;
-use crate::paths::{normalize, shortest, shortest_code};
+use crate::paths::{is_absolute, normalize, shortest, shortest_code};
 use crate::php::{Key, Php, export_str, md5, strtr, var_export};
 use crate::version::IgnorePlatform;
 use pcre2::bytes::Regex;
@@ -331,7 +331,7 @@ fn mapping(packages: &[&Pkg], kind: &str, dev_mode: bool) -> Vec<(String, Vec<St
 
 fn path_code(base: &str, vendor: &str, path: &str) -> Result<(String, String)> {
     static PHAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.phar([\\/]|$)").unwrap());
-    let path = normalize(&if path.starts_with('/') {
+    let path = normalize(&if is_absolute(path) {
         path.to_string()
     } else {
         format!("{base}/{path}")
@@ -341,7 +341,7 @@ fn path_code(base: &str, vendor: &str, path: &str) -> Result<(String, String)> {
         ("$vendorDir . ", rel.clone(), format!("{vendor}{rel}"))
     } else {
         let rel = normalize(&shortest(base, &path, true));
-        if rel.starts_with('/') {
+        if is_absolute(&rel) {
             ("", rel.clone(), rel)
         } else {
             ("$baseDir . ", format!("/{rel}"), format!("{base}/{rel}"))
@@ -392,7 +392,7 @@ fn exclusions(packages: &[&Pkg], dev_mode: bool, cwd: &str) -> Result<Vec<String
             } else {
                 install.clone()
             };
-            let resolved = std::fs::canonicalize(format!("{dir}/{updir}")).ok();
+            let resolved = pun_tokens::php_compat::canonicalize(format!("{dir}/{updir}")).ok();
             out.extend(resolved.map(|r| {
                 let quoted = preg_quote(r.to_string_lossy().as_bytes(), None);
                 format!("{}/{pattern}($|/)", String::from_utf8_lossy(&quoted))
@@ -413,7 +413,7 @@ fn exclusion_regex(dir: &str, excluded: &[String], vendor: &str) -> Result<Optio
     if excluded.is_empty() {
         return Ok(None);
     }
-    if let Ok(real) = std::fs::canonicalize(dir) {
+    if let Ok(real) = pun_tokens::php_compat::canonicalize(dir) {
         static PREFIX: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(r"^(([^.+*?\[^\]$(){}=!<>|:\\#-]+|\\[.+*?\[^\]$(){}=!<>|:#-])*).*").unwrap()
         });
@@ -558,7 +558,7 @@ pub fn dump(
     let cwd = base.to_string();
     let mut jobs = vec![];
     for given in &classmap {
-        let dir = normalize(&if given.starts_with('/') {
+        let dir = normalize(&if is_absolute(given) {
             given.clone()
         } else {
             format!("{base}/{given}")
@@ -587,7 +587,7 @@ pub fn dump(
         for (ns, groups) in scan {
             for (rule, paths) in groups {
                 for dir in paths {
-                    let dir = normalize(&if dir.starts_with('/') {
+                    let dir = normalize(&if is_absolute(&dir) {
                         dir
                     } else {
                         format!("{base}/{dir}")

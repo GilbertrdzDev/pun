@@ -1,0 +1,67 @@
+# Windows release assets, attached to the GitHub Release that cargo-dist creates for the same tag.
+# pun-windows-x86_64.zip holds pun.exe. pun-setup-x86_64.exe is the per-user Inno Setup installer.
+
+name: Release Windows
+
+on:
+  push:
+    tags:
+      - '**[0-9]+.[0-9]+.[0-9]+*'
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: "1.100"
+      - name: Build pun.exe
+        shell: pwsh
+        run: |
+          $env:PCRE2_SYS_STATIC = "1"
+          $env:RUSTFLAGS = "-C target-feature=+crt-static"
+          cargo build --locked --profile dist -p punphp
+          New-Item -ItemType Directory -Force -Path dist-windows | Out-Null
+          Copy-Item target\dist\pun.exe dist-windows\pun.exe
+          Compress-Archive -Path dist-windows\pun.exe -DestinationPath pun-windows-x86_64.zip
+          $hash = (Get-FileHash pun-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower()
+          Set-Content -NoNewline -Path pun-windows-x86_64.zip.sha256 -Value "$hash  pun-windows-x86_64.zip`n"
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          & $iscc "/DPunExe=$PWD\target\dist\pun.exe" "/DPunVersion=$version" "$PWD\packaging\windows\pun.iss"
+          Copy-Item target\windows\pun-setup-x86_64.exe pun-setup-x86_64.exe
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: |
+            pun-windows-x86_64.zip
+            pun-setup-x86_64.exe
+      - name: Attach the archives to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          for i in $(seq 1 60); do
+            if gh release view "$tag" >/dev/null 2>&1; then
+              break
+            fi
+            echo "waiting for the release $tag ($i)"
+            sleep 30
+          done
+          gh release view "$tag"
+          gh release upload "$tag" \
+            pun-windows-x86_64.zip \
+            pun-windows-x86_64.zip.sha256 \
+            pun-setup-x86_64.exe \
+            --clobber

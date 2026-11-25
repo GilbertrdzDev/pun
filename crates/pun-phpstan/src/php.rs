@@ -26,7 +26,10 @@ pub fn glob(pattern: &str) -> Vec<String> {
 }
 
 pub fn normalize_path(original: &str) -> String {
-    let local = original.starts_with('/') || original.as_bytes().get(1..3) == Some(b":\\");
+    let bytes = original.as_bytes();
+    let local = original.starts_with('/')
+        || bytes.get(1..3) == Some(b":\\")
+        || (cfg!(windows) && bytes.get(1..3) == Some(b":/"));
     let (mut scheme, path) = match original.split_once("://") {
         Some((s, p)) if !local && !p.is_empty() && is_scheme(s) => {
             (Some(s.to_ascii_lowercase()), p)
@@ -34,9 +37,22 @@ pub fn normalize_path(original: &str) -> String {
         _ => (None, original),
     };
     let path = path.replace('\\', "/").replace("//", "/");
-    let root = if path.starts_with('/') { "/" } else { "" };
+    let (root, body) = if let Some(rest) = path.strip_prefix('/') {
+        ("/", rest)
+    } else if cfg!(windows)
+        && path.len() >= 2
+        && path.as_bytes()[0].is_ascii_alphabetic()
+        && path.as_bytes()[1] == b':'
+    {
+        (&path[..2], path[2..].trim_start_matches('/'))
+    } else {
+        ("", path.as_str())
+    };
     let mut parts: Vec<&str> = Vec::new();
-    for part in path.trim_matches('/').split('/') {
+    for part in body.trim_end_matches('/').split('/') {
+        if part.is_empty() {
+            continue;
+        }
         match part {
             "." => {}
             ".." => {
@@ -50,15 +66,20 @@ pub fn normalize_path(original: &str) -> String {
             p => parts.push(p),
         }
     }
-    format!(
-        "{}{root}{}",
-        scheme.map_or_default(|s| s + "://"),
-        parts.join("/")
-    )
+    let prefix = scheme.map_or_default(|s| s + "://");
+    let joined = parts.join("/");
+    #[cfg(windows)]
+    if root.len() == 2 {
+        if joined.is_empty() {
+            return format!("{prefix}{root}");
+        }
+        return format!("{prefix}{root}/{joined}");
+    }
+    format!("{prefix}{root}{joined}")
 }
 
 pub fn absolutize_path(cwd: &str, path: &str) -> String {
-    if path.starts_with('/') || has_scheme(path) {
+    if path.starts_with('/') || has_scheme(path) || windows_absolute(path) {
         return path.to_string();
     }
     format!(
@@ -66,6 +87,14 @@ pub fn absolutize_path(cwd: &str, path: &str) -> String {
         cwd.trim_end_matches(['/', '\\']),
         path.trim_start_matches(['/', '\\'])
     )
+}
+
+fn windows_absolute(path: &str) -> bool {
+    if !cfg!(windows) {
+        return false;
+    }
+    let b = path.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
 }
 
 fn has_scheme(path: &str) -> bool {

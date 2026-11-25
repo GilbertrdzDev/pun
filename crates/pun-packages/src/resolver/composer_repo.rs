@@ -1001,16 +1001,22 @@ mod tests {
         assert!(touched.elapsed().unwrap() < Duration::from_secs(600));
 
         let lib_only = self::manifest(&base, json!({"acme/lib": "^1.0"}));
-        let readonly = dir.join("readonly");
-        let repo = readonly.join(format!("repo/{}", cache_name(&base)));
-        std::fs::create_dir_all(&repo).unwrap();
-        let mode = |m| std::os::unix::fs::PermissionsExt::from_mode(m);
-        std::fs::set_permissions(&repo, mode(0o555)).unwrap();
-        let unwritable = Fetcher::new(Some(readonly), crate::fetch::Auth::default(), false);
-        let locked = update(&unwritable, &lib_only).unwrap();
-        std::fs::set_permissions(&repo, mode(0o755)).unwrap();
-        assert_eq!(std::fs::read_dir(&repo).unwrap().count(), 0);
-        requests(&seen);
+        #[cfg(unix)]
+        let locked = {
+            let readonly = dir.join("readonly");
+            let repo = readonly.join(format!("repo/{}", cache_name(&base)));
+            std::fs::create_dir_all(&repo).unwrap();
+            let mode = |m| std::os::unix::fs::PermissionsExt::from_mode(m);
+            std::fs::set_permissions(&repo, mode(0o555)).unwrap();
+            let unwritable = Fetcher::new(Some(readonly), crate::fetch::Auth::default(), false);
+            let locked = update(&unwritable, &lib_only).unwrap();
+            std::fs::set_permissions(&repo, mode(0o755)).unwrap();
+            assert_eq!(std::fs::read_dir(&repo).unwrap().count(), 0);
+            requests(&seen);
+            locked
+        };
+        #[cfg(windows)]
+        let locked = update(&fetcher, &lib_only).unwrap();
 
         down.store(true, std::sync::atomic::Ordering::Relaxed);
         assert!(locked.contains("\"name\": \"Acme/Lib\""), "{locked}");

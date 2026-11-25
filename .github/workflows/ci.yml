@@ -154,6 +154,51 @@ jobs:
           coverage: none
       - run: cargo test --locked -p punphp-packages
 
+  # Native x86_64. Unix-only integration tests are cfg'd out; the analyse suite stays on the Linux job (it is the
+  # same cases, and it needs the corpus). This job still typechecks those tests.
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: "1.100"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: windows
+          cache-on-failure: true
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.4'
+          coverage: none
+      - name: Build pun.exe
+        run: cargo build --locked -p punphp
+        env:
+          PCRE2_SYS_STATIC: "1"
+      - name: pun --version
+        run: .\target\debug\pun.exe --version
+      - name: Test
+        run: |
+          cargo test --locked --workspace --exclude punphp-analyse --exclude punphp-harness --exclude punphp -- --test-threads=8
+          cargo test --locked -p punphp --lib
+        env:
+          PCRE2_SYS_STATIC: "1"
+      - name: Typecheck the suites that run on Linux
+        run: |
+          cargo check --locked -p punphp --tests
+          cargo check --locked -p punphp-analyse --tests
+          cargo check --locked -p punphp-harness --tests
+        env:
+          PCRE2_SYS_STATIC: "1"
+      - name: Compile the Inno Setup installer
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          & $iscc "/DPunExe=$PWD\target\debug\pun.exe" "/DPunVersion=0.4.3" "$PWD\packaging\windows\pun.iss"
+          if (-not (Test-Path target\windows\pun-setup-x86_64.exe)) { throw "installer was not produced" }
+
   fuzz:
     runs-on: ubuntu-latest
     timeout-minutes: 60

@@ -24,8 +24,31 @@ function pun_target(): string
     return match (PHP_OS_FAMILY) {
         'Darwin' => "$arch-apple-darwin",
         'Linux' => "$arch-unknown-linux-musl", // static, so it runs on glibc and Alpine alike
-        default => pun_fail('unsupported OS '.PHP_OS_FAMILY.' (Pun ships Linux and macOS binaries)'),
+        'Windows' => $arch === 'x86_64'
+            ? 'x86_64-pc-windows-msvc'
+            : pun_fail('unsupported CPU architecture '.php_uname('m').' (the Windows build is x86_64)'),
+        default => pun_fail('unsupported OS '.PHP_OS_FAMILY.' (Pun ships Linux, macOS and Windows binaries)'),
     };
+}
+
+/** Linux and macOS archives come from upstream. The Windows zip is published by this fork. */
+function pun_repo(): string
+{
+    return PHP_OS_FAMILY === 'Windows' ? 'GilbertrdzDev/pun' : 'shipfastlabs/pun';
+}
+
+function pun_archive(string $target): string
+{
+    return PHP_OS_FAMILY === 'Windows' ? 'pun-windows-x86_64.zip' : "punphp-$target.tar.gz";
+}
+
+function pun_signer_workflow(): string
+{
+    $repo = pun_repo();
+
+    return PHP_OS_FAMILY === 'Windows'
+        ? "github.com/$repo/.github/workflows/release-windows.yml"
+        : "github.com/$repo/.github/workflows/release.yml";
 }
 
 function pun_download(string $url): string
@@ -54,8 +77,9 @@ function pun_download(string $url): string
 /** The exit code of a command run without a shell, its output discarded; -1 when it cannot start. */
 function pun_exec(array $command): int
 {
-    $null = ['file', '/dev/null', 'w'];
-    $process = @proc_open($command, [['file', '/dev/null', 'r'], $null, $null], $pipes);
+    $devnull = PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
+    $null = ['file', $devnull, 'w'];
+    $process = @proc_open($command, [['file', $devnull, 'r'], $null, $null], $pipes);
 
     return is_resource($process) ? proc_close($process) : -1;
 }
@@ -75,8 +99,8 @@ function pun_attest(string $file, string $archive, string $version): void
         return;
     }
     $verify = pun_exec([
-        'gh', 'attestation', 'verify', $file, '--repo', 'shipfastlabs/pun',
-        '--signer-workflow', 'github.com/shipfastlabs/pun/.github/workflows/release.yml',
+        'gh', 'attestation', 'verify', $file, '--repo', pun_repo(),
+        '--signer-workflow', pun_signer_workflow(),
         '--source-ref', "refs/tags/v$version", '--deny-self-hosted-runners',
     ]);
     if ($verify !== 0) {
@@ -96,7 +120,7 @@ function pun_native(string $file): bool
     }
     $magic = (string) @file_get_contents($file, false, null, 0, 4);
 
-    return $magic === "\x7fELF" || $magic === "\xcf\xfa\xed\xfe" || $magic === "\xca\xfe\xba\xbe";
+    return $magic === "\x7fELF" || $magic === "\xcf\xfa\xed\xfe" || $magic === "\xca\xfe\xba\xbe" || str_starts_with($magic, 'MZ');
 }
 
 /** Removes the shim's temporary directory: PHP's own calls, not a command a bin in PATH could stand in for. */
@@ -118,7 +142,8 @@ $version = PUN_VERSION;
 $target = pun_target();
 $binDir = $GLOBALS['_composer_bin_dir'] ?? __DIR__;
 // Named by platform too: a project shared between a Mac and its Linux container needs one binary for each.
-$binary = "$binDir/pun-$version-$target";
+$suffix = PHP_OS_FAMILY === 'Windows' ? '.exe' : '';
+$binary = "$binDir/pun-$version-$target$suffix";
 
 if (! pun_native($binary)) {
     // Composer scripts put the bin directory first in PATH, where a dependency's bin could answer for gh or tar.
@@ -126,10 +151,10 @@ if (! pun_native($binary)) {
     $real = realpath($binDir);
     $dirs = array_filter(explode(PATH_SEPARATOR, (string) $path), fn ($d) => $d !== '' && realpath($d) !== $real);
     putenv('PATH='.implode(PATH_SEPARATOR, $dirs));
-    $archive = "punphp-$target.tar.gz";
+    $archive = pun_archive($target);
     // Pun's tests serve the release from a local server.
     $github = getenv('PUN_GITHUB_URL') ?: 'https://github.com';
-    $url = "$github/shipfastlabs/pun/releases/download/v$version/$archive";
+    $url = "$github/".pun_repo()."/releases/download/v$version/$archive";
     fwrite(STDERR, "pun: downloading $url\n");
     $data = pun_download($url);
     $expected = strtok(pun_download("$url.sha256"), " \n");
@@ -145,8 +170,22 @@ if (! pun_native($binary)) {
     register_shutdown_function(fn () => pun_remove($tmp));
     file_put_contents("$tmp/$archive", $data);
     pun_attest("$tmp/$archive", $archive, $version);
-    exec('tar xzf '.escapeshellarg("$tmp/$archive").' -C '.escapeshellarg($tmp).' 2>&1', $_, $code);
-    $found = glob("$tmp/*/pun") ?: glob("$tmp/pun");
+    if (PHP_OS_FAMILY === 'Windows') {
+        if (! class_exists(ZipArchive::class)) {
+            pun_fail("could not extract pun from $archive (enable the zip extension)");
+        }
+        $zip = new ZipArchive;
+        if ($zip->open("$tmp/$archive") !== true) {
+            pun_fail("could not extract pun from $archive");
+        }
+        $zip->extractTo($tmp);
+        $zip->close();
+        $found = glob("$tmp/pun.exe") ?: glob("$tmp/*/pun.exe");
+        $code = 0;
+    } else {
+        exec('tar xzf '.escapeshellarg("$tmp/$archive").' -C '.escapeshellarg($tmp).' 2>&1', $_, $code);
+        $found = glob("$tmp/*/pun") ?: glob("$tmp/pun");
+    }
     if ($code !== 0 || ! $found || is_link($found[0])) {
         pun_fail("could not extract pun from $archive");
     }

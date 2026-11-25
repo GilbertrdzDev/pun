@@ -145,7 +145,23 @@ fn dirs_in(
 ) -> Option<(PathBuf, PathBuf)> {
     let env = |k: &str| env(k).filter(|v| !v.is_empty());
     let composer_home = env("COMPOSER_HOME");
-    let user = || env("HOME").map(|h| h.trim_end_matches('/').to_string());
+    #[cfg(windows)]
+    if composer_home.is_none()
+        && let Some(app) = env("APPDATA")
+    {
+        let home = PathBuf::from(&app).join("Composer");
+        let cache = env("COMPOSER_CACHE_DIR").map_or_else(
+            || {
+                env("LOCALAPPDATA").map_or_else(
+                    || home.join("cache"),
+                    |local| PathBuf::from(local).join("Composer"),
+                )
+            },
+            PathBuf::from,
+        );
+        return Some((home, cache));
+    }
+    let user = || env("HOME").map(|h| h.trim_end_matches(['/', '\\']).to_string());
     let home = if let Some(home) = &composer_home {
         home.clone()
     } else {
@@ -581,9 +597,12 @@ pub fn unpack(kind: &str, bytes: &[u8], target: &Path) -> Result<()> {
             [only] if std::fs::symlink_metadata(only).is_ok_and(|m| m.is_dir()) => (*only).clone(),
             _ => tmp.clone(),
         };
-        // Links are checked against the package as installed, below the wrapper.
+        // Links are checked against the package as installed, below the wrapper. A copy made in place of a
+        // symlink (Windows, when creating the link was refused) is not a link: removing it here would delete a
+        // file that stayed inside the package.
         for link in links.iter().filter(|l| l.starts_with(&from)) {
-            if escapes(&from, link) {
+            let is_link = std::fs::symlink_metadata(link).is_ok_and(|m| m.file_type().is_symlink());
+            if is_link && escapes(&from, link) {
                 let _ = std::fs::remove_file(link);
             }
         }
@@ -684,6 +703,7 @@ fn untar(bytes: &[u8], dir: &Path, used: &AtomicU64) -> Result<Vec<PathBuf>> {
 /// Unpacks a zip into `dir`; the symlinks it made.
 fn unzip(bytes: &[u8], dir: &Path, used: &AtomicU64) -> Result<Vec<PathBuf>> {
     use rayon::prelude::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     let archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
     if archive.len() > MAX_ENTRIES {
@@ -703,6 +723,7 @@ fn unzip(bytes: &[u8], dir: &Path, used: &AtomicU64) -> Result<Vec<PathBuf>> {
                 return Ok(());
             }
             std::fs::create_dir_all(path.parent().unwrap_or(dir))?;
+            #[cfg(unix)]
             let mode = entry.unix_mode();
             if entry.is_symlink() {
                 // PATH_MAX: a longer target can't be followed.
@@ -724,6 +745,7 @@ fn unzip(bytes: &[u8], dir: &Path, used: &AtomicU64) -> Result<Vec<PathBuf>> {
                 },
                 &mut out,
             )?;
+            #[cfg(unix)]
             if let Some(mode) = mode.filter(|m| m & 0o111 != 0) {
                 std::fs::set_permissions(
                     &path,
@@ -738,9 +760,7 @@ fn unzip(bytes: &[u8], dir: &Path, used: &AtomicU64) -> Result<Vec<PathBuf>> {
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner))
     .into_iter()
-    .filter(|(path, target)| {
-        !target.starts_with('/') && std::os::unix::fs::symlink(target, path).is_ok()
-    })
+    .filter(|(path, target)| place_archive_link(dir, path, target))
     .map(|(path, _)| path)
     .collect())
 }
@@ -753,18 +773,148 @@ pub fn link_path(url: &str, base: &Path, target: &Path, mirror: bool) -> Result<
     } else {
         base.join(url)
     };
-    let source = std::fs::canonicalize(&source)
+    let source = pun_tokens::php_compat::canonicalize(&source)
         .with_context(|| format!("path repository {url} does not exist"))?;
     remove(target)?;
     std::fs::create_dir_all(target.parent().context("target without a parent")?)?;
     if mirror {
         return Ok(copy_tree(&source, &source, target)?);
     }
-    let parent = std::fs::canonicalize(target.parent().unwrap_or(target))?;
+    let parent = pun_tokens::php_compat::canonicalize(target.parent().unwrap_or(target))?;
     let relative =
         crate::paths::shortest(&parent.to_string_lossy(), &source.to_string_lossy(), true);
-    std::os::unix::fs::symlink(format!("{}/", relative.trim_end_matches('/')), target)?;
+    // A trailing slash marks a directory link, as Composer writes it. Windows drops it: symlink_dir
+    // follows the path, and the copy fallback copies the directory.
+    let relative = relative.trim_end_matches(['/', '\\']);
+    symlink_or_copy(Path::new(relative), target)?;
     Ok(())
+}
+
+/// An archive symlink whose target is absolute (or a Windows drive) would write outside the unpack directory.
+fn escapes_archive(target: &str) -> bool {
+    let slash = target.replace('\\', "/");
+    if slash.starts_with('/') {
+        return true;
+    }
+    let b = slash.as_bytes();
+    cfg!(windows) && b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'/'
+}
+
+/// Places one archive symlink at `link`. On Unix that is the symlink. On Windows a symlink needs Developer
+/// Mode or an elevated process; the fallback copy runs only when the target stays lexically inside `root`.
+/// A relative `..` that climbs out of the archive must not be copied into the package.
+fn place_archive_link(root: &Path, link: &Path, target: &str) -> bool {
+    if escapes_archive(target) {
+        return false;
+    }
+    let original = Path::new(target);
+    #[cfg(unix)]
+    {
+        let _ = root;
+        symlink_or_copy(original, link).is_ok()
+    }
+    #[cfg(windows)]
+    {
+        let resolved = link.parent().unwrap_or(root).join(original);
+        let resolved = PathBuf::from(resolved.to_string_lossy().trim_end_matches(['/', '\\']));
+        let directory = std::fs::metadata(&resolved).is_ok_and(|m| m.is_dir());
+        let linked = if directory {
+            std::os::windows::fs::symlink_dir(original, link)
+        } else {
+            std::os::windows::fs::symlink_file(original, link)
+        };
+        if linked.is_ok() {
+            return true;
+        }
+        // `..` that leaves the unpack directory, and a path that only looks inside until a symlink is
+        // followed, must not be copied into the package.
+        if !lexical_inside(root, &resolved) {
+            return false;
+        }
+        copy_if_inside(root, link, &resolved)
+    }
+}
+
+/// Copies `resolved` onto `link` only when its canonical path stays inside `root`. The path is resolved on
+/// disk, so a symlink in the middle cannot point the copy at a directory outside the package.
+#[cfg(any(windows, test))]
+fn copy_if_inside(root: &Path, link: &Path, resolved: &Path) -> bool {
+    let Ok(root) = pun_tokens::php_compat::canonicalize(root) else {
+        return false;
+    };
+    let Ok(real) = pun_tokens::php_compat::canonicalize(resolved) else {
+        return false;
+    };
+    if !real.starts_with(&root) || real == root {
+        return false;
+    }
+    if real.is_dir() {
+        copy_tree(&real, &real, link).is_ok()
+    } else if real.is_file() {
+        std::fs::copy(&real, link).is_ok()
+    } else {
+        false
+    }
+}
+
+/// Whether `path`, after resolving `.` and `..` without touching the filesystem, is strictly inside `root`.
+#[cfg(any(windows, test))]
+fn lexical_inside(root: &Path, path: &Path) -> bool {
+    let root = lexical_normalize(root);
+    let path = lexical_normalize(path);
+    path.starts_with(&root) && path != root
+}
+
+#[cfg(any(windows, test))]
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    out.push(component);
+                }
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Creates `link` pointing at `target`. On Unix that is a symlink. On Windows a symlink needs Developer Mode
+/// or an elevated process; without it, a directory target is copied and a file target is copied.
+pub(crate) fn symlink_or_copy(target: &Path, link: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)
+    }
+    #[cfg(windows)]
+    {
+        let resolved = if target.is_absolute() {
+            target.to_path_buf()
+        } else {
+            link.parent().unwrap_or(Path::new(".")).join(target)
+        };
+        let resolved = PathBuf::from(resolved.to_string_lossy().trim_end_matches(['/', '\\']));
+        let directory = resolved.is_dir();
+        let linked = if directory {
+            std::os::windows::fs::symlink_dir(target, link)
+        } else {
+            std::os::windows::fs::symlink_file(target, link)
+        };
+        linked.or_else(|_| {
+            if directory {
+                copy_tree(&resolved, &resolved, link)
+            } else if resolved.is_file() {
+                std::fs::copy(&resolved, link).map(|_| ())
+            } else {
+                Err(std::io::Error::other(
+                    "could not create a symlink and the target is not there to copy",
+                ))
+            }
+        })
+    }
 }
 
 /// Copies `from`, below the path repository `root`, to `to` as Composer's mirror does (Symfony's `mirror` over an
@@ -791,8 +941,8 @@ fn copy_tree(root: &Path, from: &Path, to: &Path) -> std::io::Result<()> {
         let (src, dst) = (e.path(), to.join(&name));
         let kind = e.file_type()?;
         if kind.is_symlink() {
-            if std::fs::canonicalize(&src).is_ok_and(|real| real.starts_with(root)) {
-                std::os::unix::fs::symlink(std::fs::read_link(&src)?, &dst)?;
+            if pun_tokens::php_compat::canonicalize(&src).is_ok_and(|real| real.starts_with(root)) {
+                symlink_or_copy(&std::fs::read_link(&src)?, &dst)?;
             }
         } else if kind.is_dir() {
             copy_tree(root, &src, &dst)?;
@@ -816,7 +966,59 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    /// A zip symlink's copy fallback may only read a target that stays inside the unpack directory.
+    #[test]
+    fn an_archive_link_cannot_climb_out() {
+        let root = Path::new("/tmp/pkg");
+        assert!(lexical_inside(root, Path::new("/tmp/pkg/src/A.php")));
+        assert!(lexical_inside(root, Path::new("/tmp/pkg/sub/../src/A.php")));
+        assert!(!lexical_inside(root, Path::new("/tmp/pkg/../secret")));
+        assert!(!lexical_inside(root, Path::new("/tmp/pkg")));
+        assert!(!lexical_inside(root, Path::new("/etc/passwd")));
+        assert!(escapes_archive("/etc/passwd"));
+        assert!(!escapes_archive("../secret"));
+
+        let t = scratch("escape-copy");
+        let unpack = t.join("unpack");
+        let secret = t.join("secret");
+        std::fs::create_dir_all(unpack.join("pkg")).unwrap();
+        std::fs::create_dir_all(&secret).unwrap();
+        std::fs::write(secret.join("marker.txt"), b"secret").unwrap();
+        let stolen = unpack.join("pkg/stolen");
+        let climbed = stolen.parent().unwrap().join("../../secret");
+        assert!(
+            !copy_if_inside(&unpack, &stolen, &climbed),
+            "a .. target outside the package must not be copied"
+        );
+        assert!(!stolen.exists());
+        assert_eq!(std::fs::read(secret.join("marker.txt")).unwrap(), b"secret");
+
+        std::fs::create_dir_all(unpack.join("pkg/src")).unwrap();
+        std::fs::write(unpack.join("pkg/src/A.php"), b"<?php").unwrap();
+        let inside = unpack.join("pkg/copy");
+        assert!(copy_if_inside(
+            &unpack,
+            &inside,
+            &inside.parent().unwrap().join("src")
+        ));
+        assert_eq!(std::fs::read(inside.join("A.php")).unwrap(), b"<?php");
+
+        // Lexically inside the unpack directory, but `jump` is a symlink to the secret directory.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&secret, unpack.join("jump")).unwrap();
+            let via = unpack.join("via");
+            assert!(
+                !copy_if_inside(&unpack, &via, &unpack.join("jump")),
+                "a symlink that resolves outside the package must not be copied"
+            );
+            assert!(!via.exists());
+        }
+        std::fs::remove_dir_all(&t).unwrap();
+    }
 
     #[test]
     fn composer_dirs_match_composer() {
@@ -920,6 +1122,7 @@ mod tests {
 
     /// Links planted at the temporary names a write uses (the process id is no secret) are neither written
     /// through nor removed; the file still lands.
+    #[cfg(unix)]
     #[test]
     fn store_never_writes_through_a_planted_temporary_name() {
         let d = scratch("store-planted");
@@ -1142,17 +1345,20 @@ mod tests {
             uncached.archive(&package(&url, "")).unwrap(),
             (BODY.to_vec(), false)
         );
-        let readonly = dir.join("readonly");
-        std::fs::create_dir_all(readonly.join("files/acme/lib")).unwrap();
-        let mode = std::os::unix::fs::PermissionsExt::from_mode(0o555);
-        std::fs::set_permissions(readonly.join("files/acme/lib"), mode).unwrap();
-        let fetcher = Fetcher::new(Some(readonly.clone()), Auth::default(), false);
-        assert_eq!(
-            fetcher.archive(&package(&url, "")).unwrap(),
-            (BODY.to_vec(), false)
-        );
-        let mode = std::os::unix::fs::PermissionsExt::from_mode(0o755);
-        std::fs::set_permissions(readonly.join("files/acme/lib"), mode).unwrap();
+        #[cfg(unix)]
+        {
+            let readonly = dir.join("readonly");
+            std::fs::create_dir_all(readonly.join("files/acme/lib")).unwrap();
+            let mode = std::os::unix::fs::PermissionsExt::from_mode(0o555);
+            std::fs::set_permissions(readonly.join("files/acme/lib"), mode).unwrap();
+            let fetcher = Fetcher::new(Some(readonly.clone()), Auth::default(), false);
+            assert_eq!(
+                fetcher.archive(&package(&url, "")).unwrap(),
+                (BODY.to_vec(), false)
+            );
+            let mode = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+            std::fs::set_permissions(readonly.join("files/acme/lib"), mode).unwrap();
+        }
         std::fs::write(dir.join("not-a-dir"), "").unwrap();
         let unwritable = Fetcher::new(Some(dir.join("not-a-dir")), Auth::default(), false);
         assert_eq!(
@@ -1322,18 +1528,28 @@ mod tests {
             "<?php class A {}\n"
         );
         assert!(!target.join("stale.php").exists());
-        assert_eq!(
-            std::fs::metadata(target.join("bin/run"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o755
-        );
-        assert_eq!(
-            std::fs::read_link(target.join("link.php")).unwrap(),
-            Path::new("src/A.php")
-        );
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                std::fs::metadata(target.join("bin/run"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
+            assert_eq!(
+                std::fs::read_link(target.join("link.php")).unwrap(),
+                Path::new("src/A.php")
+            );
+        }
+        #[cfg(windows)]
+        {
+            let link = target.join("link.php");
+            let linked = std::fs::read_link(&link).is_ok_and(|t| t == Path::new("src/A.php"));
+            let copied = std::fs::read_to_string(&link).is_ok_and(|t| t.contains("class A"));
+            assert!(linked || copied, "link.php should be a symlink or a copy");
+        }
         assert!(std::fs::symlink_metadata(target.join("escape")).is_err());
         assert!(
             !dir.join("vendor/acme/evil.php").exists() && !dir.join("vendor/evil.php").exists()
@@ -1403,6 +1619,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_path_repository_without_symlinks_is_copied() {
         let dir = scratch("mirror");
@@ -1435,6 +1652,7 @@ mod tests {
 
     /// Every link left in the package resolves inside it as installed: a root-level `..`, a link that only escapes
     /// once the wrapper is stripped, and a chain whose parts each look inside are dropped; links within stay.
+    #[cfg(unix)]
     #[test]
     fn links_stay_inside_the_installed_package() {
         let dir = scratch("links");

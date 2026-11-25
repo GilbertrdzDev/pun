@@ -86,7 +86,15 @@ fn oracle_blade_fixtures() {
     std::fs::create_dir_all(&project).unwrap();
     let link = project.join("node_modules");
     let _ = std::fs::remove_file(&link);
+    #[cfg(unix)]
     std::os::unix::fs::symlink(&modules, &link).unwrap();
+    #[cfg(windows)]
+    {
+        if std::os::windows::fs::symlink_dir(&modules, &link).is_err() {
+            eprintln!("skipping blade oracle: Windows could not link node_modules");
+            return;
+        }
+    }
     let pipeline = pipeline();
     let html: &[u8] = b"<div>\n<p>x</p></div>\n";
     let bare = std::env::temp_dir().join(format!("pun-blade-test-{}", std::process::id()));

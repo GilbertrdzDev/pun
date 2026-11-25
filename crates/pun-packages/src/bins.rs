@@ -1,6 +1,7 @@
 use crate::paths::{shortest, shortest_code};
 use pcre2::bytes::Regex;
 use std::fmt::Write as _;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::LazyLock;
@@ -45,8 +46,8 @@ pub fn proxies(
             warnings.push(skip(bin, "found a directory at that path"));
             continue;
         }
-        let inside = (std::fs::canonicalize(file).ok())
-            .zip(std::fs::canonicalize(install).ok())
+        let inside = (pun_tokens::php_compat::canonicalize(file).ok())
+            .zip(pun_tokens::php_compat::canonicalize(install).ok())
             .is_some_and(|(real, root)| real.starts_with(&root) && real != root);
         if !inside {
             warnings.push(skip(
@@ -95,7 +96,7 @@ fn proxy(bin: &str, link: &str, head: &[u8], vendor: &str) -> String {
     let exported = shortest_code(link, bin, false, true);
     let comment = relative.replace(['\r', '\n'], " ").replace("*/", "* /");
     let mut globals = "$GLOBALS['_composer_bin_dir'] = __DIR__;\n".to_string();
-    let autoload = std::fs::canonicalize(vendor)
+    let autoload = pun_tokens::php_compat::canonicalize(vendor)
         .map_or_else(|_| vendor.to_string(), |p| p.to_string_lossy().into_owned());
     let _ = writeln!(
         globals,
@@ -216,7 +217,8 @@ pub fn write(proxy: &Proxy, bin_dir: &Path) -> std::io::Result<()> {
         crate::fetch::store(&link, proxy.text.as_bytes())?;
     }
     // Only a mode that differs is changed, so an unchanged install leaves the files' change times alone (the
-    // no-op fingerprint reads them).
+    // no-op fingerprint reads them). Windows has no Unix mode bits; PHP still runs a proxy by path.
+    #[cfg(unix)]
     for path in [link.as_path(), Path::new(&proxy.target)] {
         if std::fs::metadata(path)?.permissions().mode() & 0o7777 != 0o755 {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;

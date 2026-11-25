@@ -140,8 +140,17 @@ impl Runner {
             with_args(&callable)
         };
         eprintln!("> {}", with_args(&callable));
-        // `/bin/sh`, as Symfony's Process starts it for Composer: the child's PATH puts the bin dir first.
+        // Symfony's Process starts Composer scripts with `/bin/sh -c` on Unix and `cmd /D /C` on Windows.
+        // The child's PATH puts the bin dir first; the shell itself is not taken from that PATH.
+        #[cfg(unix)]
         let status = self.command("/bin/sh").arg("-c").arg(&exec).status()?;
+        #[cfg(windows)]
+        let status = self
+            .command("cmd")
+            .arg("/D")
+            .arg("/C")
+            .arg(&exec)
+            .status()?;
         if !status.success() {
             bail!(
                 "Script {callable} handling the {event} event returned with error code {}",
@@ -183,9 +192,15 @@ impl Runner {
     fn command(&self, program: &str) -> Command {
         let mut c = Command::new(program);
         c.current_dir(&self.base);
-        let path = &self.path;
-        if Path::new(&self.bin_dir).is_dir() && !path.split(':').any(|p| p == self.bin_dir) {
-            c.env("PATH", format!("{}:{path}", self.bin_dir));
+        if Path::new(&self.bin_dir).is_dir() {
+            let existing: Vec<PathBuf> = std::env::split_paths(&self.path).collect();
+            if !existing.iter().any(|p| p == Path::new(&self.bin_dir)) {
+                let mut paths = vec![PathBuf::from(&self.bin_dir)];
+                paths.extend(existing);
+                if let Ok(path) = std::env::join_paths(&paths) {
+                    c.env("PATH", path);
+                }
+            }
         }
         c.env("COMPOSER_DEV_MODE", if self.dev_mode { "1" } else { "0" });
         c.env("PHP_BINARY", &self.php);
@@ -209,7 +224,6 @@ pub(crate) struct Helper {
 impl Helper {
     pub(crate) fn new(name: &str, source: &str) -> std::io::Result<Helper> {
         use std::io::Write;
-        use std::os::unix::fs::DirBuilderExt;
         let nanos = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH))
             .map_or(0, |d| d.as_nanos());
         let mut attempt = 0;
@@ -217,7 +231,17 @@ impl Helper {
             let dir = std::env::temp_dir()
                 .join(format!("pun-{}-{nanos:x}-{attempt}", std::process::id()));
             // `mkdir` fails on any existing entry, a link included, so the directory is new and ours.
-            match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            // On Unix it is mode 0700; Windows has no Unix mode bits.
+            #[cfg(unix)]
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            #[cfg(windows)]
+            let builder = std::fs::DirBuilder::new();
+            match builder.create(&dir) {
                 Ok(()) => {
                     let helper = Helper {
                         path: dir.join(name),
@@ -250,16 +274,56 @@ impl Drop for Helper {
 /// `program`'s path in `path`, the PATH pun started with, so a bin the scripts' PATH puts first can't stand in for
 /// PHP (Composer runs its own `PHP_BINARY`); `program` itself when it has a slash or isn't found.
 fn which(program: &str, path: &str) -> String {
-    use std::os::unix::fs::PermissionsExt;
-    if program.contains('/') {
+    if program.contains('/') || program.contains('\\') {
         return program.to_string();
     }
-    (path.split(':').filter(|d| !d.is_empty()))
-        .map(|d| Path::new(d).join(program))
-        .find(|p| {
-            std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        })
-        .map_or_else(|| program.to_string(), |p| p.to_string_lossy().into_owned())
+    // A name that already has an extension (`php.exe`) is looked up as written. Otherwise Windows also tries
+    // `PATHEXT`, so `php` finds `php.exe`.
+    let exts: Vec<String> = if program.contains('.') {
+        vec![String::new()]
+    } else {
+        path_extensions()
+    };
+    for dir in std::env::split_paths(path) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        for ext in &exts {
+            let candidate = dir.join(format!("{program}{ext}"));
+            if is_runnable(&candidate) {
+                return candidate.to_string_lossy().into_owned();
+            }
+        }
+    }
+    program.to_string()
+}
+
+#[cfg(unix)]
+fn path_extensions() -> Vec<String> {
+    vec![String::new()]
+}
+
+#[cfg(windows)]
+fn path_extensions() -> Vec<String> {
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    let mut exts: Vec<String> = pathext
+        .split(';')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    exts.push(String::new());
+    exts
+}
+
+#[cfg(unix)]
+fn is_runnable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(windows)]
+fn is_runnable(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.is_file())
 }
 
 fn php_binary(env: Option<String>) -> String {
@@ -267,8 +331,40 @@ fn php_binary(env: Option<String>) -> String {
         .unwrap_or_else(|| "php".into())
 }
 
+/// Shell-quotes one argument. Unix scripts run under `/bin/sh` (single quotes). Windows scripts run under
+/// `cmd.exe`, which treats only double quotes as quoting.
+#[cfg(unix)]
 fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+#[cfg(windows)]
+fn quote(s: &str) -> String {
+    if !s
+        .chars()
+        .any(|c| matches!(c, ' ' | '"' | '&' | '|' | '<' | '>' | '^' | '%' | '(' | ')'))
+    {
+        return s.to_string();
+    }
+    let mut out = String::from("\"");
+    let mut slashes = 0usize;
+    for c in s.chars() {
+        if c == '\\' {
+            slashes += 1;
+            continue;
+        }
+        if c == '"' {
+            out.push_str(&"\\".repeat(slashes * 2 + 1));
+            out.push('"');
+        } else {
+            out.push_str(&"\\".repeat(slashes));
+            out.push(c);
+        }
+        slashes = 0;
+    }
+    out.push_str(&"\\".repeat(slashes * 2));
+    out.push('"');
+    out
 }
 
 fn split_args(command: &str) -> Vec<String> {
@@ -325,6 +421,7 @@ mod tests {
         .dispatch(event, &[])
     }
 
+    #[cfg(unix)]
     #[test]
     fn commands_references_and_environment() {
         let d = project("run");
@@ -352,6 +449,7 @@ mod tests {
         std::fs::remove_dir_all(&d).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn arguments_like_composer() {
         let d = project("args");
@@ -409,6 +507,7 @@ mod tests {
 
     /// Composer runs scripts with `/bin/sh` and its own PHP; a dependency's `sh` or `php` in the bin dir, which the
     /// scripts' PATH puts first, runs neither.
+    #[cfg(unix)]
     #[test]
     fn the_bin_dir_does_not_supply_the_interpreters() {
         let d = project("interpreters");
@@ -432,6 +531,7 @@ mod tests {
 
     /// The callback runner goes in a new private directory: a link at a guessable name in the shared temporary
     /// directory is neither written through nor run.
+    #[cfg(unix)]
     #[test]
     fn helpers_are_private_and_new() {
         use std::os::unix::fs::PermissionsExt;
@@ -488,6 +588,23 @@ mod tests {
             "Script Acme\\Hooks::fail handling the x event returned with error code 1"
         );
         run(&d, json!({"x": "Acme\\Missing::run"}), "x").unwrap();
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// Composer scripts on Windows are a `cmd.exe` command line, so arguments with spaces are double-quoted and
+    /// `cmd /D /C` runs the line.
+    #[cfg(windows)]
+    #[test]
+    fn windows_scripts_run_through_cmd() {
+        let d = project("cmd");
+        assert_eq!(quote("two words"), "\"two words\"");
+        assert_eq!(quote("plain"), "plain");
+        assert_eq!(quote("say \"hi\""), "\"say \\\"hi\\\"\"");
+        let scripts = json!({"a": "echo hello> out.txt"});
+        run(&d, scripts, "a").unwrap();
+        let text = std::fs::read_to_string(d.join("out.txt")).unwrap();
+        assert!(text.contains("hello"), "{text}");
+        assert_eq!(which(r"C:\php\php.exe", ""), r"C:\php\php.exe");
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

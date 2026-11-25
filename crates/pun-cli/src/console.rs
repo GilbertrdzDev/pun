@@ -110,6 +110,10 @@ pub(crate) fn width() -> usize {
     if let Ok(c) = std::env::var("COLUMNS") {
         return php_int(c.trim());
     }
+    #[cfg(windows)]
+    if let Some(w) = console_columns() {
+        return w;
+    }
     let stty = std::process::Command::new("stty")
         .arg("-a")
         .stdin(std::process::Stdio::inherit())
@@ -124,6 +128,49 @@ pub(crate) fn width() -> usize {
     match cols {
         Some(w) if w > 0 => w,
         _ => 80,
+    }
+}
+
+/// The visible width of the console attached to stdout, from `GetConsoleScreenBufferInfo`.
+#[cfg(windows)]
+fn console_columns() -> Option<usize> {
+    #[repr(C)]
+    struct Coord {
+        x: i16,
+        y: i16,
+    }
+    #[repr(C)]
+    struct SmallRect {
+        left: i16,
+        top: i16,
+        right: i16,
+        bottom: i16,
+    }
+    #[repr(C)]
+    struct ConsoleScreenBufferInfo {
+        size: Coord,
+        cursor: Coord,
+        attributes: u16,
+        window: SmallRect,
+        maximum: Coord,
+    }
+    unsafe extern "system" {
+        fn GetStdHandle(handle: u32) -> *mut std::ffi::c_void;
+        fn GetConsoleScreenBufferInfo(
+            handle: *mut std::ffi::c_void,
+            info: *mut ConsoleScreenBufferInfo,
+        ) -> i32;
+    }
+    const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+    // SAFETY: GetStdHandle returns the process stdout handle, and the info struct is ours for the call.
+    unsafe {
+        let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        let mut info = std::mem::zeroed();
+        if GetConsoleScreenBufferInfo(handle, &mut info) == 0 {
+            return None;
+        }
+        let width = i32::from(info.window.right) - i32::from(info.window.left) + 1;
+        usize::try_from(width).ok().filter(|w| *w > 0)
     }
 }
 

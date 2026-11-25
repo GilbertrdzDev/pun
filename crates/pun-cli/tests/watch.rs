@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! `pun format --watch` on a live directory: the first run and every re-run report the files the real Pint reports
 //! for the same files (`php .oracle/pint/builds/pint <files>` on a copy; the output itself is Pun's own, compared as
 //! in tests/common), files end up as Pint leaves them, excluded files are left alone, Pun's own writes don't trigger

@@ -852,7 +852,7 @@ fn extensions() {
     let bootstrap = |toml: &str| {
         let root = dir(&[("pun.toml", toml)]);
         let analyse = load(&root, &Options::default()).unwrap().analyse;
-        let prefix = format!("{}/", root.display());
+        let prefix = format!("{}/", root.to_string_lossy().replace('\\', "/"));
         let parameters = analyse.parameters(&root);
         let files = (parameters.get_str("bootstrapFiles"))
             .and_then(pun_phpstan::Value::as_array)
@@ -1186,6 +1186,7 @@ fn explain_names() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn files_paths_stay_in_the_project() {
     let d = dir(&[]);
@@ -1879,12 +1880,14 @@ not-path = ["y"]
         let err = from_pint(&d.join("pint.json"), None, &|_| true)
             .err()
             .unwrap();
+        let denied = if cfg!(windows) {
+            "Access is denied. (os error 5)"
+        } else {
+            "Is a directory (os error 21)"
+        };
         assert_eq!(
             format!("{err:#}"),
-            format!(
-                "can't read {}: Is a directory (os error 21)",
-                d.join("pint.json").display()
-            )
+            format!("can't read {}: {denied}", d.join("pint.json").display())
         );
         assert!(e(&[("pint.json", "{")]).ends_with("pint.json] is not valid JSON."));
         assert_eq!(
@@ -1995,7 +1998,7 @@ fn analyse_parameters() {
     let get = |k: &str| p.get_str(k).cloned();
     assert_eq!(get("level"), Some(V::Int(1)));
     assert_eq!(get("checkClassCaseSensitivity"), Some(V::Bool(false)));
-    let root = d.display().to_string();
+    let root = d.to_string_lossy().replace('\\', "/");
     let list =
         |items: &[&str]| V::Array(pun_phpstan::Array::list(items.iter().map(|s| V::str(*s))));
     assert_eq!(

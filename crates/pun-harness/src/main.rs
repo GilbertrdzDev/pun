@@ -216,12 +216,18 @@ fn main() -> Result<ExitCode> {
 /// A new directory under `parent` that only this user can open. Creating it fails if the name exists, so it is never a
 /// directory another user sharing the temporary directory made and filled with links.
 fn private_dir(parent: &Path) -> Result<PathBuf> {
-    use std::os::unix::fs::DirBuilderExt;
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .subsec_nanos();
     let dir = parent.join(format!("pun-harness-{}-{nanos}", std::process::id()));
-    (fs::DirBuilder::new().mode(0o700).create(&dir))
+    #[cfg(unix)]
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    #[cfg(windows)]
+    let builder = fs::DirBuilder::new();
+    builder
+        .create(&dir)
         .with_context(|| format!("creating {}", dir.display()))?;
     Ok(dir)
 }
@@ -281,13 +287,36 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
         }
         let ty = entry.file_type()?;
         if name == "node_modules" {
-            std::os::unix::fs::symlink(&from, &to)?;
+            symlink_or_copy(&from, &to)?;
         } else if ty.is_dir() {
             copy_tree(&from, &to)?;
         } else if ty.is_symlink() {
-            std::os::unix::fs::symlink(fs::read_link(&from)?, &to)?;
+            symlink_or_copy(&fs::read_link(&from)?, &to)?;
         } else {
             fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+fn symlink_or_copy(target: &Path, link: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)?;
+    }
+    #[cfg(windows)]
+    {
+        let linked = if target.is_dir() {
+            std::os::windows::fs::symlink_dir(target, link)
+        } else {
+            std::os::windows::fs::symlink_file(target, link)
+        };
+        if linked.is_err() {
+            if target.is_dir() {
+                copy_tree(target, link)?;
+            } else {
+                fs::copy(target, link)?;
+            }
         }
     }
     Ok(())

@@ -119,9 +119,7 @@ pub(crate) fn fetcher(root: &Path, manifest: &Map<String, Value>) -> Fetcher {
 /// new project whose dependencies go in a new composer.json. In a workspace member, the project is the workspace's root.
 pub(crate) fn project(working_dir: Option<&PathBuf>, create: bool) -> Result<Project> {
     let here = match working_dir {
-        Some(d) => d
-            .canonicalize()
-            .with_context(|| format!("can't open {}", d.display()))?,
+        Some(d) => crate::canonical(d).with_context(|| format!("can't open {}", d.display()))?,
         None => crate::root()?,
     };
     let workspace = crate::workspace::find(&here)?;

@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! `pun migrate` end to end. Expectations are hand-derived from pint.json and context/plan/rules.md §4, or come from the real
 //! Pint (`php .oracle/pint/builds/pint`) on the unmigrated project.
 mod common;

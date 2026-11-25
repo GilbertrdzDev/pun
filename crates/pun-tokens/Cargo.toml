@@ -11,9 +11,11 @@ name = "pun_tokens"
 
 [dependencies]
 foldhash.workspace = true
-libc.workspace = true
 pcre2.workspace = true
 mago-php-version = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [features]
 mago = ["dep:mago-php-version"]

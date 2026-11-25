@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Discovery parity with the real Pint (`php .oracle/pint/builds/pint`): every scenario builds a tree whose PHP
 //! files all start with `<?PHP` (pint.json enables only `full_opening_tag`), so `pint --test --format=txt` lists
 //! every discovered regular file ("N) path") and counts every discovered file, symlinks included ("Found x of N").

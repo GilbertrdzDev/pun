@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! `pun migrate` + `pun format` against the real Pint (`php .oracle/pint/builds/pint`) on the same pint.json: same
 //! exit code, resulting files and machine-format stdout for every flag combination below, run in the same directory
 //! (so diff headers and absolute paths agree). Human output is Pun's own: those runs compare the files each tool

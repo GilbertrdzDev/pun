@@ -6,6 +6,21 @@ pub struct RelativePath {
     trim: Option<String>,
 }
 
+/// Windows paths (and the `\\?\` form `canonicalize` returns) become `C:/a/b`. Elsewhere a path is unchanged.
+#[cfg(windows)]
+fn norm(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    match path.strip_prefix("//?/") {
+        Some(rest) => rest.to_string(),
+        None => path,
+    }
+}
+
+#[cfg(not(windows))]
+fn norm(path: &str) -> String {
+    path.to_string()
+}
+
 fn trim_beginning(path: &str) -> (&str, &str) {
     match path.strip_prefix('/') {
         Some(rest) => ("/", rest),
@@ -15,6 +30,10 @@ fn trim_beginning(path: &str) -> (&str, &str) {
 
 impl RelativePath {
     pub fn new(cwd: &str, analysed_paths: &[String]) -> RelativePath {
+        let cwd = norm(cwd);
+        let cwd = cwd.as_str();
+        let analysed_paths: Vec<String> = analysed_paths.iter().map(|p| norm(p)).collect();
+        let analysed_paths = analysed_paths.as_slice();
         let mut beginning = "";
         let mut to_trim: Option<Vec<&str>> = None;
         if !matches!(cwd, "" | "/") {
@@ -48,7 +67,7 @@ impl RelativePath {
         }
         let trim = to_trim.filter(|t| !t.is_empty()).map(|t| {
             let trim = format!("{beginning}{}", t.join("/"));
-            std::fs::canonicalize(&trim).map_or(trim, |p| p.to_string_lossy().into_owned())
+            pun_tokens::php_compat::canonicalize(&trim).map_or(trim, |p| norm(&p.to_string_lossy()))
         });
         RelativePath {
             cwd: cwd.to_string(),
@@ -64,6 +83,8 @@ impl RelativePath {
     }
 
     pub fn get(&self, filename: &str) -> String {
+        let filename = norm(filename);
+        let filename = filename.as_str();
         if let Some(rest) = self.trim.as_deref().and_then(|t| filename.strip_prefix(t)) {
             return rest.trim_start_matches('/').to_string();
         }
@@ -89,6 +110,8 @@ impl RelativePath {
     }
 
     pub(crate) fn simple(&self, filename: &str) -> String {
+        let filename = norm(filename);
+        let filename = filename.as_str();
         let rest = (!self.cwd.is_empty())
             .then(|| filename.strip_prefix(self.cwd.as_str()))
             .flatten();

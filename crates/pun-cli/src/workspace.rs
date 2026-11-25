@@ -60,14 +60,14 @@ fn globs(root: &Path) -> Result<Option<Vec<String>>> {
 fn load(root: &Path, globs: Vec<String>) -> Result<Workspace> {
     let (mut members, mut matching): (Vec<Member>, Vec<String>) = (vec![], vec![]);
     let real_root =
-        std::fs::canonicalize(root).with_context(|| format!("can't open {}", root.display()))?;
+        crate::canonical(root).with_context(|| format!("can't open {}", root.display()))?;
     for glob in globs {
         let mut matches = false;
         for dir in expand(root, &glob) {
             let Some(name) = name_of(&dir)? else { continue };
             // A member is a folder of this repo: one reached through `..` or a link elsewhere would let a member's
             // `require -p` edit another checkout's composer.json.
-            if !std::fs::canonicalize(&dir).is_ok_and(|real| real.starts_with(&real_root)) {
+            if !crate::canonical(&dir).is_ok_and(|real| real.starts_with(&real_root)) {
                 bail!(
                     "the workspace member {name} in {} is outside the workspace root {}",
                     dir.display(),

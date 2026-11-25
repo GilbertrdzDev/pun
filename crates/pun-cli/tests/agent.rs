@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Agent mode (context/PLAN.md "Agent-optimised output"): detection priority and the exact lines of every command.
 //! Expected rule IDs and summaries come from rules/mapping.toml, the fixers each input triggers from Pint
 //! (`php .oracle/pint/builds/pint --format=agent` on the same files), the env list from the agent-detector crate
